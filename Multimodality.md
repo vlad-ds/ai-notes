@@ -225,12 +225,48 @@ So in each layer, the CLS token:
 3. Takes a weighted combination of all patch values
 4. Updates its representation
 
+**The information flow in ViT**
+
+It's important to understand who talks to whom:
+
+```
+In each transformer layer, ALL tokens attend to ALL tokens:
+
+        CLS ←→ patch_1 ←→ patch_2 ←→ ... ←→ patch_256
+         ↑        ↑          ↑                  ↑
+         └────────┴──────────┴──────────────────┘
+                   (everyone talks to everyone)
+```
+
+But at the OUTPUT, only CLS matters for classification:
+
+```
+After all 12 layers:
+
+  [CLS']  [patch_1']  [patch_2']  ...  [patch_256']
+    │         │            │               │
+    │         └────────────┴───────────────┘
+    │                      │
+    │              (thrown away)
+    ↓
+classifier → prediction → loss
+```
+
+So the patches influence the output, but only **indirectly through CLS**:
+- Patch 47 contains info about a cat's ear
+- Patch 47 attends to neighboring patches, refining its representation
+- CLS attends to patch 47 and absorbs the "cat ear" information
+- CLS output goes to classifier
+
+The patches are like a team of researchers gathering and discussing information among themselves, but only one person (CLS) presents to the board. The presenters' insights come from the team's discussions, but only the presentation affects the final decision.
+
 Let's trace through concretely:
 
 **Layer 1:**
 - CLS token (random vector) attends to all patches
-- Attention weights might be roughly uniform (it doesn't know what to focus on yet)
+- Patches attend to each other (and to CLS, though CLS has nothing useful yet)
 - CLS absorbs a blurry average of all patch information
+- Neighboring patches start sharing information (patch 5 learns about patch 6)
 
 **Layer 2:**
 - CLS token (now containing some image info) attends to all patches
