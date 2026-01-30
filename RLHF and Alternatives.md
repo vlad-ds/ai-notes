@@ -106,6 +106,58 @@ Where does the response come from in the first place? It depends on the training
 
 This function is fundamental. Policy gradients, PPO, DPO; they all rely on being able to compute these log probabilities.
 
+### How the Policy Gradient Works at the Token Level
+
+This is a crucial detail that's easy to misunderstand. When we talk about "the loss for a response," you might imagine computing one scalar per response and then backpropagating that. But that's not quite right. Let's be very precise.
+
+**The policy gradient formula in textbooks:**
+```
+loss = -advantage × log P(response | prompt)
+```
+
+This looks like one scalar times one scalar. But `log P(response | prompt)` is itself a sum of per-token log probabilities. Expanding this:
+
+```
+loss = -advantage × [log P(token_1) + log P(token_2) + ... + log P(token_N)]
+```
+
+Which distributes to:
+
+```
+loss = -advantage × log P(token_1)
+     + -advantage × log P(token_2)
+     + ...
+     + -advantage × log P(token_N)
+```
+
+**The key insight:** The same advantage (one scalar for the whole response) gets multiplied by each token's log probability separately. When you call `loss.backward()`, PyTorch computes gradients for each token's contribution independently.
+
+**In practice with batched sequences:**
+
+```python
+# Shape: (batch_size, seq_len)
+log_probs = compute_per_token_log_probs(model, sequences)
+
+# Shape: (batch_size,) - one advantage per sequence
+advantages = rewards - baseline
+
+# Broadcast: advantages[:, None] has shape (batch_size, 1)
+# This multiplies each token by its sequence's advantage
+per_token_objective = log_probs * advantages[:, None]
+
+# Sum everything into one scalar
+loss = -per_token_objective.sum() / num_valid_tokens
+
+# One backward pass updates all weights
+loss.backward()
+```
+
+**What this means for credit assignment:**
+
+Every token in a "good" response (positive advantage) gets pushed to be more likely. Every token in a "bad" response (negative advantage) gets pushed to be less likely. The model learns which token *patterns* lead to good outcomes, not just which final answers are good.
+
+This is why we say the gradient is "noisy" in REINFORCE: if only one token in a 100-token response caused the bad outcome, all 100 tokens still get the same negative gradient signal. The model has to average over many examples to figure out which tokens actually matter. Value functions and other variance reduction techniques help with this, but the fundamental token-level mechanics remain the same.
+
 ---
 
 ## Part 2: The RLHF Pipeline
@@ -229,7 +281,9 @@ The naive approach to RL would be: generate a response, get its reward, multiply
 >
 > Two words: **high variance**.
 >
-> The reward is a single scalar for the entire sequence. When you backprop that through 100 tokens, every token gets the same gradient signal, even though maybe only 3 tokens were actually responsible for the bad output. The gradient is incredibly noisy.
+> The reward is a single scalar for the entire sequence. This same scalar (the advantage) gets applied to every token in that sequence. If the response was good (positive advantage), every token gets pushed to be more likely. If bad (negative advantage), every token gets pushed to be less likely. Even though maybe only 3 tokens were actually responsible for the bad output, all 100 tokens get the same "bad response" signal.
+>
+> (Note: the advantage is the same, but the actual gradient per model parameter is computed token by token; each token's log probability contributes separately to the loss. The problem is that we're applying a sequence-level judgment to token-level updates.)
 >
 > In practice this means:
 > - Training is unstable (one unlucky batch can wreck your model)

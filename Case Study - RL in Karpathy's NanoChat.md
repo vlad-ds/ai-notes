@@ -58,7 +58,7 @@ Advantages: [0.75, -0.25, 0.75, -0.25, -0.25, ...]
 
 The correct responses get positive advantage (+0.75): "you beat the average, do more of this." The incorrect responses get negative advantage (-0.25): "you underperformed, do less of this."
 
-This is exactly what GRPO does (we covered this in Part 4). The only difference is that NanoChat doesn't normalize by standard deviation. GRPO would compute:
+This is exactly what GRPO does. The only difference is that NanoChat doesn't normalize by standard deviation. GRPO would compute:
 
 ```python
 std = compute_std(rewards)
@@ -139,30 +139,86 @@ Second, the task is narrow. NanoChat is training on GSM8K math problems, not gen
 
 This wouldn't work for general RLHF, where the reward comes from an imperfect proxy (the reward model) and the task space is vast. But for verifiable, narrow tasks, you can often skip the KL regularization.
 
+## How the Loss Actually Works: Token-Level Credit Assignment
+
+This is a crucial detail that's easy to misunderstand. Let's be very precise about what happens.
+
+**The common misconception:** You might think we compute one loss per sequence, then average across sequences, then do one backward pass. That's not what happens.
+
+**What actually happens:**
+
+1. Each sequence gets ONE advantage (e.g., +0.75 for correct, -0.25 for incorrect)
+2. That same advantage is applied to EVERY token in the sequence
+3. All tokens from ALL sequences are summed into ONE scalar loss
+4. ONE backward pass updates the entire model
+
+Here's the exact code from Karpathy's implementation:
+
+```python
+# logp has shape (16, T) - log prob for each token in each of 16 sequences
+# advantages has shape (16,) - one advantage per sequence
+
+# Broadcast: each token gets multiplied by its sequence's advantage
+pg_obj = (logp * advantages.unsqueeze(-1)).sum()  # sum everything → ONE number
+
+# Normalize by total valid tokens across ALL sequences
+num_valid = (targets >= 0).sum()
+loss = -pg_obj / num_valid
+
+# ONE backward pass
+loss.backward()
+```
+
+**Concrete example with numbers:**
+
+Say we have 2 sequences (for simplicity):
+- Sequence A: correct (advantage = +0.75), has 3 tokens with log probs [-1.2, -0.8, -1.5]
+- Sequence B: incorrect (advantage = -0.25), has 2 tokens with log probs [-2.0, -1.0]
+
+The loss computation:
+```
+Sequence A contributions: (-1.2 × 0.75) + (-0.8 × 0.75) + (-1.5 × 0.75) = -2.625
+Sequence B contributions: (-2.0 × -0.25) + (-1.0 × -0.25) = +0.75
+
+Sum: -2.625 + 0.75 = -1.875
+Normalize by 5 tokens: -1.875 / 5 = -0.375
+Negate for loss: 0.375
+
+One backward pass with loss = 0.375
+```
+
+**Why this matters:**
+
+The gradient signal for each token is `advantage / num_total_tokens`. Every token in a correct response gets pushed up; every token in an incorrect response gets pushed down. The model learns which token patterns lead to correct answers, not just which final answers are correct.
+
+This is different from sequence-level REINFORCE where you'd compute `sum(log_probs)` first, then multiply by advantage. The mathematical result is similar, but the normalization differs: NanoChat normalizes by total tokens (so long and short responses contribute proportionally), while sequence-level would normalize by number of sequences.
+
+---
+
 ## Token-Level vs Sequence-Level Normalization
 
-One detail in NanoChat worth highlighting: the loss is computed per-token, not per-sequence.
+NanoChat uses what they call "DAPO-style" normalization (from a recent paper on direct alignment).
 
-In standard REINFORCE, you'd compute the loss as:
-
+**Sequence-level normalization** (standard REINFORCE):
 ```python
-# Sequence-level: one scalar advantage for the whole response
-sequence_log_prob = sum(log_prob(token) for token in response)
-loss = -advantage * sequence_log_prob
+# Each sequence contributes equally, regardless of length
+for seq_idx in range(num_sequences):
+    seq_log_prob = sum(log_prob(token) for token in sequence[seq_idx])
+    losses.append(-advantage[seq_idx] * seq_log_prob)
+loss = sum(losses) / num_sequences
 ```
 
-NanoChat does something different, which they call "DAPO-style" (from a recent paper on direct alignment):
-
+**Token-level normalization** (NanoChat/DAPO):
 ```python
-# Token-level: apply advantage to each token separately
-per_token_log_probs = [log_prob(token) for token in response]
-per_token_objective = sum(adv * lp for lp, adv in zip(per_token_log_probs, advantages))
-
-# Normalize by number of valid tokens, not sequences
-loss = -per_token_objective / num_valid_tokens
+# Each token contributes equally
+all_terms = []
+for seq_idx in range(num_sequences):
+    for token in sequence[seq_idx]:
+        all_terms.append(log_prob(token) * advantage[seq_idx])
+loss = -sum(all_terms) / len(all_terms)
 ```
 
-The practical effect: loss is normalized by the total number of tokens across all responses, not by the number of sequences. This means long responses and short responses contribute proportionally to their length, rather than one long correct response dominating the loss.
+The practical effect: with token-level normalization, long responses and short responses contribute proportionally to their length. A 100-token correct response provides 100 gradient signals; a 10-token correct response provides 10. With sequence-level, both would contribute equally.
 
 ## The Mask: Learning Only From What You Generated
 
