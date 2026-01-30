@@ -452,6 +452,57 @@ The minimum operation ensures we always take the more conservative option. The i
 
 PPO clipping is often described as "preventing too-large updates," which is technically true but misleading. It's not about preventing violent updates in general; it's specifically about recognizing when your training data has become unreliable because the model that generated it is too different from the model you're updating. If you were strictly on-policy (generating fresh data for each update), you wouldn't need clipping at all.
 
+### Sample Efficiency: Why Reuse Data at All?
+
+**Sample efficiency** means: how much learning do you get per generated response?
+
+Generating responses is the expensive part of RL training. You run the model token-by-token, which is slow. So the question is: once you've generated a response, how much can you learn from it?
+
+**Low sample efficiency (on-policy, like NanoChat):**
+```python
+generate 16 responses → one gradient update → throw away → generate 16 new responses
+```
+Each response is used once, then discarded.
+
+**Higher sample efficiency (PPO):**
+```python
+generate 16 responses → update → update → update → update → generate new batch
+```
+Each response is used for multiple gradient updates before discarding.
+
+**How does reusing work? The gradients differ each time:**
+
+```python
+# Generate once (expensive)
+responses = model_v1.generate(prompts)
+old_log_probs = model_v1.log_prob(responses)  # store these
+rewards = reward_model.score(responses)
+
+# Update multiple times on same batch (cheap)
+for epoch in range(4):
+    current_log_probs = model.log_prob(responses)  # different each epoch!
+    ratio = exp(current_log_probs - old_log_probs)
+    loss = compute_ppo_loss(ratio, advantages)
+    loss.backward()
+    optimizer.step()  # model changes → next epoch has different current_log_probs
+```
+
+What happens across epochs:
+- Epoch 1: `ratio ≈ 1.0` (model just generated these), normal gradient
+- Epoch 2: `ratio ≈ 1.05` (model shifted a bit), slightly different gradient
+- Epoch 3: `ratio ≈ 1.12` (model shifted more), gradient still useful
+- Epoch 4: `ratio ≈ 1.25` (too far!) → clipping activates, gradient goes to zero
+
+The model keeps learning from the same examples until its opinion of them has changed too much (ratio outside [0.8, 1.2]). At that point, clipping says "you've extracted what you can from this batch, time for fresh data."
+
+So clipping isn't just safety - it's also the natural stopping condition that tells you when a batch is "used up."
+
+**The trade-off:**
+
+More sample-efficient methods (PPO) need complexity to handle stale data (clipping, storing old log probs). Less sample-efficient methods (on-policy) are simpler but need more compute for generation.
+
+For a small model on simple problems, generation is cheap enough that low sample efficiency is fine. For a 70B model generating long responses, you really want to squeeze multiple updates out of each batch.
+
 ### The KL Penalty: Don't Forget Your Roots
 
 There's one more crucial piece of RLHF that we haven't discussed: the KL penalty. Without it, the language model might find degenerate ways to get high rewards that have nothing to do with being genuinely helpful.
