@@ -67,6 +67,15 @@ ASCII diagrams, tables for comparison, concrete examples—these often communica
 
 **Conversational tone.** "You might think X, but actually Y." "Why doesn't this cause problems? Two reasons." "That's it." The writing should feel like a knowledgeable friend explaining something, not a textbook being formal.
 
+**No empty phrases.** Eliminate AI slop patterns—sentences that sound important but contain no information:
+- "Here's the key insight:"
+- "This is important to understand:"
+- "Let's break this down:"
+- "It's worth noting that..."
+- "Interestingly enough..."
+
+These are filler. If something is a key insight, just state it. The insight itself should make its importance obvious. Delete the throat-clearing and get to the point.
+
 ## Editing Process
 
 **Reread for global coherence after edits.** After making changes to a note, reread the entire document to ensure it still flows as a coherent whole. Incremental edits can create Frankenstein notes—redundant sections, inconsistent examples, or awkward transitions. If something feels off, fix it. If unsure whether a fix is right, ask.

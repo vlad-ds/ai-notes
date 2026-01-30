@@ -6,7 +6,7 @@
 
 An LLM is, at its core, a machine that processes sequences of vectors. When you type "Hello world", the tokenizer converts it to token IDs, and the embedding layer converts those IDs into vectors. The transformer then attends over this sequence of vectors, updating them through layers until the final representation emerges.
 
-Here's the key insight that unlocks multimodality: the transformer doesn't actually care where those vectors came from. It just sees positions in a sequence, each carrying a d-dimensional vector. So if we could somehow convert an image, or an audio clip, or a video, into a sequence of vectors in the same space as text embeddings—the transformer would process them just like words.
+The transformer doesn't actually care where those vectors came from. It just sees positions in a sequence, each carrying a d-dimensional vector. So if we could somehow convert an image, or an audio clip, or a video, into a sequence of vectors in the same space as text embeddings—the transformer would process them just like words.
 
 That's the entire trick. Every multimodal model, from GPT-4V to Whisper to video understanding systems, is doing some version of this:
 
@@ -227,7 +227,7 @@ So in each layer, the CLS token:
 
 **The information flow in ViT**
 
-It's important to understand who talks to whom:
+Who talks to whom:
 
 ```
 In each transformer layer, ALL tokens attend to ALL tokens:
@@ -284,7 +284,7 @@ Let's trace through concretely:
 
 **What makes the CLS token special? Why does IT become the aggregator?**
 
-Here's the key insight: the CLS token isn't inherently special. It becomes the aggregator because **we only use it for the final prediction, and we throw away all other tokens.**
+The CLS token isn't inherently special. It becomes the aggregator because **we only use it for the final prediction, and we throw away all other tokens.**
 
 Look at how classification works:
 
@@ -518,7 +518,7 @@ The LLM processes this combined sequence with its normal attention mechanism. It
 
 ### LLaVA's Training Recipe
 
-LLaVA (Large Language and Vision Assistant) provides a clean example of how to train a multimodal model. The key insight: you don't need to train everything from scratch. You can take an already-trained vision encoder, an already-trained LLM, and just learn to connect them.
+LLaVA (Large Language and Vision Assistant) provides a clean example of how to train a multimodal model. You don't need to train everything from scratch. You can take an already-trained vision encoder, an already-trained LLM, and just learn to connect them.
 
 LLaVA uses:
 - **Vision encoder**: A pretrained ViT from CLIP (we'll cover CLIP later—it's a vision model trained to understand images in relation to text)
