@@ -61,6 +61,20 @@ self.proj = nn.Conv2d(
 # Output: (batch, 768, 14, 14) → reshape to (batch, 196, 768)
 ```
 
+Notice that the stride equals the kernel size. This means the patches are **non-overlapping**—each 16×16 region of pixels belongs to exactly one patch, with no shared pixels between neighbors. The image is tiled cleanly:
+
+```
+┌────┬────┬────┬────┐
+│ 1  │ 2  │ 3  │ 4  │   Each patch covers its own 16×16 region.
+├────┼────┼────┼────┤   No pixel belongs to more than one patch.
+│ 5  │ 6  │ 7  │ 8  │
+├────┼────┼────┼────┤
+│ 9  │ 10 │ 11 │ 12 │
+└────┴────┴────┴────┘
+```
+
+Some later variants experimented with overlapping patches (stride < kernel size), which can capture information at patch boundaries better but increases the sequence length. The original ViT paper used non-overlapping for simplicity and efficiency.
+
 Now we have 196 tokens instead of 150K—a 750× reduction. And each token represents a semantic chunk of the image (part of an eye, an edge of a table, a patch of sky) rather than a meaningless single pixel.
 
 The rest of the Vision Transformer is just a standard transformer encoder. We prepend a learnable CLS token (like BERT), add positional embeddings, and run transformer layers. The output is a sequence of 197 vectors, each 768-dimensional.
