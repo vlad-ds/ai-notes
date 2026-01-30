@@ -46,10 +46,31 @@ Original image (224×224):              Divided into patches:
                                        196 patches total, each 16×16 pixels
 ```
 
-A 224×224 image becomes 14×14 = 196 patches. Each patch contains 16 × 16 × 3 = 768 values. We project each patch through a linear layer to get a 768-dimensional embedding vector.
+A 224×224 image becomes 14×14 = 196 patches. Each patch contains 16 × 16 × 3 = 768 pixel values. These raw values get projected through a linear layer to produce a 768-dimensional embedding. In this case the input and output dimensions happen to match, which obscures what's really happening—the projection is learning to extract *semantic* features from raw pixels, not just passing values through.
+
+To see the compression more clearly, consider a higher-resolution setup with larger patches:
 
 ```python
-# The entire patch embedding is just one convolution
+# Larger patches make the compression obvious
+self.proj = nn.Conv2d(
+    in_channels=3,       # RGB
+    out_channels=768,    # embedding dimension
+    kernel_size=32,      # larger patch size
+    stride=32            # non-overlapping
+)
+
+# With a 512×512 image and 32×32 patches:
+# - We get 16×16 = 256 patches
+# - Each patch has 32 × 32 × 3 = 3072 raw pixel values
+# - These 3072 values get projected DOWN to 768 dimensions
+# - That's 4:1 compression!
+```
+
+The convolution is doing real work here: it learns which combinations of those 3072 pixel values matter for understanding the image content, and compresses that into 768 semantic features.
+
+Back to the standard ViT setup:
+
+```python
 self.proj = nn.Conv2d(
     in_channels=3,      # RGB
     out_channels=768,   # embedding dimension
