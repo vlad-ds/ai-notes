@@ -160,30 +160,121 @@ This is element-wise addition. Each of the 256 patches gets its own positional e
 
 **Step 5: Prepend a CLS token**
 
-Here's something that might seem strange: we add a *new* token at the beginning of the sequence that doesn't correspond to any patch. This is called the CLS (classification) token, borrowed from BERT.
+Here's something that might seem strange: we add a *new* token at the beginning of the sequence that doesn't correspond to any patch. This is called the CLS (classification) token, borrowed from BERT. Understanding why it exists and how it works requires understanding how attention works in this context.
 
-Why? The transformer processes all 256 patch tokens in parallel, with each token attending to all others. At the end, each patch token contains information about its local region plus context from other patches. But we need a single vector to represent the whole image (for tasks like classification, or to feed to an LLM). Which patch should we use?
+**The problem: we need a single vector for the whole image**
 
-The CLS token solves this. It's a learnable vector that starts with no image information. Through transformer layers, it attends to all patches and aggregates information from the entire image. At the end, the CLS token's output vector represents the whole image.
+After the transformer processes our 256 patch tokens, each patch token will contain information about its region plus context from other patches. But for tasks like classification ("is this a cat or a dog?"), we need a single vector representing the entire image to feed to a classifier. Which of the 256 patch vectors should we use?
+
+We could average them all, but that treats all patches equally. We could use a specific patch (like the center), but that's arbitrary. The CLS token is a more elegant solution.
+
+**What is the CLS token?**
+
+The CLS token is a learnable vector—just another parameter of the model, like the weights in the linear layers. It's initialized randomly and updated during training through backpropagation.
 
 ```python
-# Create a learnable CLS token: a single 1024-dim vector
+# A learnable 1024-dimensional vector
+cls_token = nn.Parameter(torch.randn(1, 1024))
+```
+
+We prepend it to the sequence of patch embeddings:
+
+```python
+# Before: patches has shape (256, 1024)
+# After: sequence has shape (257, 1024)
+sequence = torch.cat([cls_token, patches], dim=0)
+
+# The sequence is now: [CLS, patch_1, patch_2, ..., patch_256]
+# Positions:           [ 0,    1,       2,     ...,    256   ]
+```
+
+**Why position 0?** Convention, borrowed from BERT. It could be anywhere—what matters is that it's in the sequence and can attend to all other tokens.
+
+**How does attention work here? (Bidirectional, not masked)**
+
+This is crucial. In ViT, we use a transformer **encoder** with **bidirectional attention**. This is different from GPT-style decoders that use causal (masked) attention.
+
+In causal attention (GPT), each token can only attend to previous tokens—token 5 can see tokens 0-4 but not 6-256. This is for autoregressive generation where you can't peek at future tokens.
+
+In bidirectional attention (BERT, ViT), every token can attend to every other token. Token 5 can see tokens 0-4 AND tokens 6-256. There's no masking. This makes sense for images: there's no "future" in an image, all patches exist simultaneously.
+
+```
+Causal attention (GPT):              Bidirectional attention (ViT):
+
+Token 0 sees: [0]                    Token 0 sees: [0,1,2,3,4,5...]
+Token 1 sees: [0,1]                  Token 1 sees: [0,1,2,3,4,5...]
+Token 2 sees: [0,1,2]                Token 2 sees: [0,1,2,3,4,5...]
+Token 3 sees: [0,1,2,3]              Token 3 sees: [0,1,2,3,4,5...]
+...                                  ...
+(triangular mask)                    (no mask—full attention)
+```
+
+**How does the CLS token aggregate information?**
+
+The CLS token starts as a random vector with no image information. But it's in position 0 of the sequence, and in bidirectional attention, it can attend to ALL 256 patch tokens.
+
+In transformer attention, each token computes:
+1. "What am I looking for?" (query, from the token itself)
+2. "What do others have to offer?" (keys and values, from all tokens)
+3. "How relevant is each other token to me?" (attention weights = softmax of query·key)
+4. "What should I take from them?" (weighted sum of values)
+
+So in each layer, the CLS token:
+1. Produces a query vector based on its current state
+2. Computes attention weights over all 256 patches (and itself)
+3. Takes a weighted combination of all patch values
+4. Updates its representation
+
+Let's trace through concretely:
+
+**Layer 1:**
+- CLS token (random vector) attends to all patches
+- Attention weights might be roughly uniform (it doesn't know what to focus on yet)
+- CLS absorbs a blurry average of all patch information
+
+**Layer 2:**
+- CLS token (now containing some image info) attends to all patches
+- But now the patches have also been updated—each patch attended to its neighbors in layer 1
+- CLS is now attending to "patches that know about their neighborhoods"
+
+**Layer 6:**
+- CLS has refined its query: "I'm looking for high-level features"
+- Patches have been mixing information for 5 layers—each contains broad context
+- CLS attention weights become more selective: high weights on informative patches, low on background
+
+**Layer 12:**
+- CLS token has attended to all patches, directly and indirectly, many times
+- Its representation now encodes global image features: "this image contains a cat, facing left, on a couch"
+
+**How does the CLS token learn what to aggregate?**
+
+Through training. The loss signal flows backward from the classification task:
+
+1. CLS token output → classifier → prediction "cat" → loss (cross-entropy with true label)
+2. Gradients flow back through classifier → back through all 12 transformer layers → back to CLS token's initial value
+
+The gradients adjust:
+- The CLS token's initial value (so it starts as a better "query" for useful image features)
+- The attention weights in each layer (so CLS learns to focus on informative patches)
+- Everything else in the network
+
+Over millions of images, the CLS token learns to be an effective "information aggregator." Its initial value becomes a learned query meaning something like "tell me the high-level content of this image," and the attention patterns learn to route relevant information to it.
+
+**Code with positional embedding**
+
+```python
+# Create learnable CLS token
 cls_token = nn.Parameter(torch.randn(1, 1024))
 
-# Prepend it to the sequence
-# Before: embedded_patches has shape (256, 1024)
-# After: sequence has shape (257, 1024)
-sequence = torch.cat([cls_token, embedded_patches], dim=0)
-```
+# Prepend to sequence
+sequence = torch.cat([cls_token, embedded_patches], dim=0)  # (257, 1024)
 
-The sequence is now: `[CLS, patch_1, patch_2, ..., patch_256]` — 257 tokens total.
-
-We also need a positional embedding for the CLS token (position 0), so we actually have 257 positional embeddings:
-
-```python
-pos_embed = nn.Parameter(torch.randn(257, 1024))  # 1 for CLS + 256 for patches
+# Positional embeddings: one for each position including CLS at position 0
+pos_embed = nn.Parameter(torch.randn(257, 1024))
 sequence = sequence + pos_embed
 ```
+
+The sequence is now: `[CLS, patch_1, patch_2, ..., patch_256]` at positions `[0, 1, 2, ..., 256]`.
 
 **Step 6: Run through transformer layers**
 
