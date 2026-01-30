@@ -28,89 +28,76 @@ This fails spectacularly, for two reasons. First, quadratic attention on 150K to
 
 ### The Vision Transformer: Patches as Tokens
 
-The breakthrough came in 2020 with the Vision Transformer (ViT). The idea is simple: instead of treating each pixel as a token, treat each 16×16 patch of the image as a token.
+The breakthrough came in 2020 with the Vision Transformer (ViT). The idea is simple: instead of treating each pixel as a token, treat each patch of the image as a token.
 
 ```
-Original image (224×224):              Divided into patches:
+Original image (512×512):              Divided into 32×32 patches:
 
-┌──────────────────────────────┐       ┌───┬───┬───┬───┬───┬───┬───┐
-│                              │       │ 1 │ 2 │ 3 │ 4 │ 5 │ 6 │ 7 │← 14 patches across
-│                              │       ├───┼───┼───┼───┼───┼───┼───┤
-│        (a photo of           │  →    │ 8 │ 9 │...│   │   │   │   │
-│         something)           │       ├───┼───┼───┼───┼───┼───┼───┤
-│                              │       │   │   │   │   │   │   │   │← 14 patches down
-│                              │       ├───┼───┼───┼───┼───┼───┼───┤
-└──────────────────────────────┘       │   │   │   │   │   │   │196│
-                                       └───┴───┴───┴───┴───┴───┴───┘
+┌──────────────────────────────┐       ┌────┬────┬────┬────┐
+│                              │       │ 1  │ 2  │ 3  │ 4  │← 16 patches across
+│                              │       ├────┼────┼────┼────┤
+│        (a photo of           │  →    │ 5  │ 6  │ .. │    │
+│         something)           │       ├────┼────┼────┼────┤
+│                              │       │    │    │    │    │← 16 patches down
+│                              │       ├────┼────┼────┼────┤
+└──────────────────────────────┘       │    │    │    │256 │
+                                       └────┴────┴────┴────┘
 
-                                       196 patches total, each 16×16 pixels
+                                       256 patches total, each 32×32 pixels
 ```
 
-A 224×224 image becomes 14×14 = 196 patches. Each patch contains 16 × 16 × 3 = 768 pixel values. These raw values get projected through a linear layer to produce a 768-dimensional embedding. In this case the input and output dimensions happen to match, which obscures what's really happening—the projection is learning to extract *semantic* features from raw pixels, not just passing values through.
-
-To see the compression more clearly, consider a higher-resolution setup with larger patches:
+Let's use a concrete example. Take a 512×512 image with 32×32 patches:
 
 ```python
-# Larger patches make the compression obvious
 self.proj = nn.Conv2d(
     in_channels=3,       # RGB
-    out_channels=768,    # embedding dimension
-    kernel_size=32,      # larger patch size
-    stride=32            # non-overlapping
+    out_channels=1024,   # embedding dimension
+    kernel_size=32,      # patch size
+    stride=32            # same as kernel_size = non-overlapping
 )
 
-# With a 512×512 image and 32×32 patches:
-# - We get 16×16 = 256 patches
-# - Each patch has 32 × 32 × 3 = 3072 raw pixel values
-# - These 3072 values get projected DOWN to 768 dimensions
-# - That's 4:1 compression!
+# Input: (batch, 3, 512, 512)
+# Output: (batch, 1024, 16, 16) → reshape to (batch, 256, 1024)
 ```
 
-The convolution is doing real work here: it learns which combinations of those 3072 pixel values matter for understanding the image content, and compresses that into 768 semantic features.
+Working through the numbers:
+- 512 ÷ 32 = 16 patches per side, so 16 × 16 = **256 patches** total
+- Each patch contains 32 × 32 × 3 = **3072 raw pixel values**
+- These get projected down to **1024 dimensions**
+- That's 3:1 compression per patch
 
-Back to the standard ViT setup:
+The convolution learns which combinations of those 3072 pixel values matter for understanding image content, and compresses them into 1024 semantic features. This is real work—not just reshaping, but learning to extract meaningful representations from raw pixels.
 
-```python
-self.proj = nn.Conv2d(
-    in_channels=3,      # RGB
-    out_channels=768,   # embedding dimension
-    kernel_size=16,     # patch size
-    stride=16           # non-overlapping patches
-)
-
-# Input: (batch, 3, 224, 224)
-# Output: (batch, 768, 14, 14) → reshape to (batch, 196, 768)
-```
-
-Notice that the stride equals the kernel size. This means the patches are **non-overlapping**—each 16×16 region of pixels belongs to exactly one patch, with no shared pixels between neighbors. The image is tiled cleanly:
+Notice that stride equals kernel size. This means the patches are **non-overlapping**—each 32×32 region belongs to exactly one patch:
 
 ```
 ┌────┬────┬────┬────┐
-│ 1  │ 2  │ 3  │ 4  │   Each patch covers its own 16×16 region.
+│ 1  │ 2  │ 3  │ 4  │   Each patch covers its own 32×32 region.
 ├────┼────┼────┼────┤   No pixel belongs to more than one patch.
 │ 5  │ 6  │ 7  │ 8  │
 ├────┼────┼────┼────┤
 │ 9  │ 10 │ 11 │ 12 │
 └────┴────┴────┴────┘
+        ... 256 patches total
 ```
 
-Some later variants experimented with overlapping patches (stride < kernel size), which can capture information at patch boundaries better but increases the sequence length. The original ViT paper used non-overlapping for simplicity and efficiency.
+Some variants use overlapping patches (stride < kernel size) to better capture information at boundaries, but this increases the sequence length. The original ViT used non-overlapping for simplicity.
 
-Now we have 196 tokens instead of 150K—a 750× reduction. And each token represents a semantic chunk of the image (part of an eye, an edge of a table, a patch of sky) rather than a meaningless single pixel.
+Now we have 256 tokens instead of 786K values (512×512×3)—a 3000× reduction. And each token represents a semantic chunk of the image rather than a meaningless single pixel.
 
-The rest of the Vision Transformer is just a standard transformer encoder. We prepend a learnable CLS token (like BERT), add positional embeddings, and run transformer layers. The output is a sequence of 197 vectors, each 768-dimensional.
+The rest of the Vision Transformer is just a standard transformer encoder. We prepend a learnable CLS token (like BERT), add positional embeddings, and run transformer layers. The output is a sequence of 257 vectors (256 patches + 1 CLS), each 1024-dimensional.
 
 ### Connecting Vision to Language
 
 Here's where multimodality actually happens. We have:
 
-- Vision encoder output: 197 vectors of dimension 768
+- Vision encoder output: 257 vectors of dimension 1024
 - LLM embedding space: vectors of dimension 4096 (for a typical 7B model)
 
 These don't match. We need a projection layer that maps vision space into language space. The simplest version is just a linear layer:
 
 ```python
-vision_proj = nn.Linear(768, 4096)
+vision_proj = nn.Linear(1024, 4096)
 ```
 
 More sophisticated versions use an MLP or even cross-attention. But the principle is the same: learn a mapping that translates "what the vision encoder thinks this patch means" into "something the LLM can understand."
@@ -120,7 +107,7 @@ Once projected, the vision tokens are concatenated with the text tokens:
 ```
 Sequence fed to LLM:
 
-[img_1] [img_2] ... [img_197] [What] [is] [in] [this] [image] [?]
+[img_1] [img_2] ... [img_257] [What] [is] [in] [this] [image] [?]
    ↑                              ↑
    └─ projected vision tokens     └─ regular text embeddings
 ```
@@ -298,7 +285,7 @@ The downside: native multimodality requires vastly more compute to train. You're
 
 ## Part 4: Video — Time Makes Everything Harder
 
-Video is images plus time. A 10-second clip at 30fps has 300 frames. If each frame becomes 196 tokens (like ViT), that's 58,800 tokens per video—far too many for practical attention.
+Video is images plus time. A 10-second clip at 30fps has 300 frames. If each frame becomes 256 tokens (like ViT), that's 76,800 tokens per video—far too many for practical attention.
 
 The core challenge is how to capture temporal information without exploding the token count.
 
@@ -311,7 +298,7 @@ Original video: 300 frames
                 ▼
 Sample uniformly: frames 0, 37, 75, 112, 150, 187, 225, 262
                 ▼
-Result: 8 frames × 196 patches = 1,568 tokens ✓
+Result: 8 frames × 256 patches = 2,048 tokens ✓
 ```
 
 This works surprisingly well for many tasks. Most videos have redundancy—consecutive frames are nearly identical. Sampling every ~40 frames (at 30fps, that's ~1.3 seconds between samples) often captures the essential information.
@@ -351,13 +338,13 @@ Every modality follows the same recipe:
 │  ─────────────────────────────────────────────────────────────────────  │
 │                                                                         │
 │  Image     →    ViT (patches)      →    Linear/MLP    →               │
-│  (H×W×3)        (196 × 768)             (196 × 4096)      │           │
+│  (H×W×3)        (256 × 1024)            (256 × 4096)      │           │
 │                                                            │           │
 │  Audio     →    Whisper encoder    →    Linear/MLP    →   │ Unified   │
 │  (mel spec)     (1500 × 512)            (1500 × 4096)     │ Transformer│
 │                                                            │           │
 │  Video     →    ViT + temporal     →    Linear/MLP    →   │           │
-│  (T×H×W×3)      (T×196 × 768)           (T×196 × 4096)    │           │
+│  (T×H×W×3)      (T×256 × 1024)          (T×256 × 4096)    │           │
 │                                                            │           │
 │  Text      →    Tokenizer          →    (identity)    →               │
 │  (string)       (S × 4096)              (S × 4096)                     │

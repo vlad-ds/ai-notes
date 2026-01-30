@@ -48,6 +48,10 @@ ASCII diagrams, tables for comparison, concrete examples—these often communica
 
 **Conversational tone.** "You might think X, but actually Y." "Why doesn't this cause problems? Two reasons." "That's it." The writing should feel like a knowledgeable friend explaining something, not a textbook being formal.
 
+## Editing Process
+
+**Reread for global coherence after edits.** After making changes to a note, reread the entire document to ensure it still flows as a coherent whole. Incremental edits can create Frankenstein notes—redundant sections, inconsistent examples, or awkward transitions. If something feels off, fix it. If unsure whether a fix is right, ask.
+
 ## Mathematical Formulas
 
 I'm not fluent in mathematical notation. When formulas are necessary:
