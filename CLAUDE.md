@@ -44,6 +44,8 @@ Original image (224×224):          After patching (14×14 patches of 16×16):
 
 ASCII diagrams, tables for comparison, concrete examples—these often communicate better than another code block.
 
+**Generated diagrams with Python.** For more complex visuals (architecture diagrams, data flow illustrations, plots), generate them with matplotlib or PIL and save to the `assets/` folder. Embed in notes with `![[assets/filename.png]]`. This gives precise control over technical diagrams and doesn't require external image generation services.
+
 **Conversational tone.** "You might think X, but actually Y." "Why doesn't this cause problems? Two reasons." "That's it." The writing should feel like a knowledgeable friend explaining something, not a textbook being formal.
 
 ## Mathematical Formulas
