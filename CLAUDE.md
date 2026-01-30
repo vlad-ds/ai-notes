@@ -61,7 +61,17 @@ Original image (224×224):          After patching (14×14 patches of 16×16):
 └────────────────────────┘         │  │  │  │  │  │  │  │ ... 196 patches total
 ```
 
-ASCII diagrams, tables for comparison, concrete examples—these often communicate better than another code block.
+ASCII diagrams, concrete examples—these often communicate better than another code block.
+
+**Use proper markdown tables, not ASCII tables.** For tabular data, use markdown table syntax:
+
+```
+| Column A | Column B | Column C |
+|----------|----------|----------|
+| value 1  | value 2  | value 3  |
+```
+
+ASCII box-drawing tables (with `┌`, `│`, `└` characters) often render poorly depending on fonts and display contexts. Markdown tables are more reliable.
 
 **Generated diagrams with Python.** For more complex visuals (architecture diagrams, data flow illustrations, plots), generate them with matplotlib or PIL and save to the `assets/` folder. Embed in notes with `![[assets/filename.png]]`. This gives precise control over technical diagrams and doesn't require external image generation services.
 
