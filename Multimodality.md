@@ -28,7 +28,7 @@ This fails spectacularly, for two reasons. First, quadratic attention on 150K to
 
 ### The Vision Transformer: Patches as Tokens
 
-The breakthrough came in 2020 with the Vision Transformer (ViT). The idea is simple: instead of treating each pixel as a token, treat each patch of the image as a token.
+The breakthrough came in 2020 with the Vision Transformer (ViT). The idea is simple: instead of treating each pixel as a token, treat each *patch* of the image as a token.
 
 ```
 Original image (512×512):              Divided into 32×32 patches:
@@ -46,46 +46,223 @@ Original image (512×512):              Divided into 32×32 patches:
                                        256 patches total, each 32×32 pixels
 ```
 
-Let's use a concrete example. Take a 512×512 image with 32×32 patches:
+Let's work through this step by step with a concrete example: a 512×512 RGB image divided into 32×32 pixel patches.
 
-```python
-self.proj = nn.Conv2d(
-    in_channels=3,       # RGB
-    out_channels=1024,   # embedding dimension
-    kernel_size=32,      # patch size
-    stride=32            # same as kernel_size = non-overlapping
-)
+**Step 1: Divide the image into patches**
 
-# Input: (batch, 3, 512, 512)
-# Output: (batch, 1024, 16, 16) → reshape to (batch, 256, 1024)
-```
+We tile the image into non-overlapping squares. With a 512×512 image and 32×32 patches:
+- 512 ÷ 32 = 16 patches per side
+- 16 × 16 = **256 patches** total
 
-Working through the numbers:
-- 512 ÷ 32 = 16 patches per side, so 16 × 16 = **256 patches** total
-- Each patch contains 32 × 32 × 3 = **3072 raw pixel values**
-- These get projected down to **1024 dimensions**
-- That's 3:1 compression per patch
-
-The convolution learns which combinations of those 3072 pixel values matter for understanding image content, and compresses them into 1024 semantic features. This is real work—not just reshaping, but learning to extract meaningful representations from raw pixels.
-
-Notice that stride equals kernel size. This means the patches are **non-overlapping**—each 32×32 region belongs to exactly one patch:
+Each patch is a small square containing 32 × 32 pixels, and each pixel has 3 color values (RGB). So each patch contains 32 × 32 × 3 = **3072 numbers**.
 
 ```
 ┌────┬────┬────┬────┐
 │ 1  │ 2  │ 3  │ 4  │   Each patch covers its own 32×32 region.
 ├────┼────┼────┼────┤   No pixel belongs to more than one patch.
-│ 5  │ 6  │ 7  │ 8  │
+│ 5  │ 6  │ 7  │ 8  │   (This is what "non-overlapping" means.)
 ├────┼────┼────┼────┤
 │ 9  │ 10 │ 11 │ 12 │
 └────┴────┴────┴────┘
         ... 256 patches total
 ```
 
-Some variants use overlapping patches (stride < kernel size) to better capture information at boundaries, but this increases the sequence length. The original ViT used non-overlapping for simplicity.
+**Step 2: Flatten each patch into a vector**
 
-Now we have 256 tokens instead of 786K values (512×512×3)—a 3000× reduction. And each token represents a semantic chunk of the image rather than a meaningless single pixel.
+Take each 32×32×3 patch and flatten it into a single vector of 3072 numbers. Now we have 256 vectors, each of length 3072.
 
-The rest of the Vision Transformer is just a standard transformer encoder. We prepend a learnable CLS token (like BERT), add positional embeddings, and run transformer layers. The output is a sequence of 257 vectors (256 patches + 1 CLS), each 1024-dimensional.
+```python
+# Conceptually:
+patches = []
+for row in range(16):
+    for col in range(16):
+        # Extract the 32×32×3 region
+        patch = image[:, row*32:(row+1)*32, col*32:(col+1)*32]  # shape: (3, 32, 32)
+        # Flatten to a vector
+        flat = patch.flatten()  # shape: (3072,)
+        patches.append(flat)
+patches = torch.stack(patches)  # shape: (256, 3072)
+```
+
+**Step 3: Project each patch to a smaller embedding dimension**
+
+3072 numbers per patch is unwieldy. We want each patch represented by a fixed-size embedding vector, say 1024 dimensions. This is done with a simple linear transformation: multiply the 3072-dimensional vector by a learnable weight matrix of shape (3072, 1024).
+
+```python
+# Linear projection: 3072 → 1024
+patch_embed = nn.Linear(3072, 1024)
+
+# Each patch gets projected
+embedded_patches = patch_embed(patches)  # shape: (256, 1024)
+```
+
+This is **learned compression**. The weight matrix starts random, but during training it learns which combinations of pixels matter. Maybe it learns that certain edge patterns are important, or that color gradients in particular directions indicate texture. The 1024 output dimensions encode these learned features.
+
+(Technical note: In practice, this is often implemented as a 2D convolution with kernel_size=32 and stride=32, which does the same thing more efficiently. But conceptually, it's just "flatten each patch, then multiply by a weight matrix.")
+
+Now we have 256 vectors instead of 786K values (512×512×3)—a 3000× reduction. And each vector represents a semantic chunk of the image rather than meaningless individual pixels.
+
+### Building the Full Vision Transformer
+
+We have 256 patch embeddings, each a 1024-dimensional vector. Now we need to process them through a transformer. But transformers have a problem with images: they have no built-in notion of position. When processing text, position matters ("dog bites man" ≠ "man bites dog"), so transformers add positional information. Images need this too—patch 1 (top-left) and patch 256 (bottom-right) contain different spatial information.
+
+**Step 4: Add positional embeddings**
+
+Positional embeddings are vectors that encode "where" each patch came from in the image. We create a learnable embedding for each position (1 through 256), and add it to the corresponding patch embedding.
+
+```python
+# Create learnable position embeddings: one 1024-dim vector per position
+pos_embed = nn.Parameter(torch.randn(256, 1024))
+
+# Add position information to each patch
+# Position 0's embedding gets added to patch 0, position 1's to patch 1, etc.
+embedded_patches = embedded_patches + pos_embed  # shape still (256, 1024)
+```
+
+This is element-wise addition. Each of the 256 patches gets its own positional embedding added. The model learns during training what these positional embeddings should be—they end up encoding spatial relationships like "top-left corner" or "center of image."
+
+**Step 5: Prepend a CLS token**
+
+Here's something that might seem strange: we add a *new* token at the beginning of the sequence that doesn't correspond to any patch. This is called the CLS (classification) token, borrowed from BERT.
+
+Why? The transformer processes all 256 patch tokens in parallel, with each token attending to all others. At the end, each patch token contains information about its local region plus context from other patches. But we need a single vector to represent the whole image (for tasks like classification, or to feed to an LLM). Which patch should we use?
+
+The CLS token solves this. It's a learnable vector that starts with no image information. Through transformer layers, it attends to all patches and aggregates information from the entire image. At the end, the CLS token's output vector represents the whole image.
+
+```python
+# Create a learnable CLS token: a single 1024-dim vector
+cls_token = nn.Parameter(torch.randn(1, 1024))
+
+# Prepend it to the sequence
+# Before: embedded_patches has shape (256, 1024)
+# After: sequence has shape (257, 1024)
+sequence = torch.cat([cls_token, embedded_patches], dim=0)
+```
+
+The sequence is now: `[CLS, patch_1, patch_2, ..., patch_256]` — 257 tokens total.
+
+We also need a positional embedding for the CLS token (position 0), so we actually have 257 positional embeddings:
+
+```python
+pos_embed = nn.Parameter(torch.randn(257, 1024))  # 1 for CLS + 256 for patches
+sequence = sequence + pos_embed
+```
+
+**Step 6: Run through transformer layers**
+
+Now we have a sequence of 257 vectors, each 1024-dimensional. This gets fed through standard transformer encoder layers—the same architecture used in BERT or GPT, with multi-head self-attention and feed-forward networks.
+
+```python
+# Standard transformer encoder
+transformer = nn.TransformerEncoder(
+    nn.TransformerEncoderLayer(d_model=1024, nhead=16),
+    num_layers=12
+)
+
+output = transformer(sequence)  # shape: (257, 1024)
+```
+
+Each layer:
+1. Computes self-attention: every token attends to every other token, learning which patches are relevant to which
+2. Applies a feed-forward network: two linear layers with a non-linearity, processing each token independently
+
+After 12 layers, the CLS token (position 0) has attended to all patches multiple times and accumulated information about the entire image.
+
+**Step 7: Extract the image representation**
+
+The final output is 257 vectors of dimension 1024. For image classification, we typically use just the CLS token:
+
+```python
+image_representation = output[0]  # The CLS token, shape: (1024,)
+```
+
+For multimodal LLMs, we often use all 257 tokens (or just the 256 patch tokens), giving the language model access to spatially-localized information.
+
+### The Complete Forward Pass
+
+Putting it all together:
+
+```python
+class VisionTransformer(nn.Module):
+    def __init__(self, image_size=512, patch_size=32, embed_dim=1024, num_layers=12):
+        super().__init__()
+        num_patches = (image_size // patch_size) ** 2  # 256
+        patch_dim = patch_size * patch_size * 3         # 3072
+
+        # Learnable parameters
+        self.patch_embed = nn.Linear(patch_dim, embed_dim)     # 3072 → 1024
+        self.cls_token = nn.Parameter(torch.randn(1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.randn(num_patches + 1, embed_dim))
+
+        # Transformer
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=embed_dim, nhead=16, batch_first=True),
+            num_layers=num_layers
+        )
+
+    def forward(self, image):
+        # image shape: (batch, 3, 512, 512)
+        batch_size = image.shape[0]
+
+        # Step 1-2: Extract and flatten patches
+        # Reshape to (batch, 16, 16, 32, 32, 3), then to (batch, 256, 3072)
+        patches = image.unfold(2, 32, 32).unfold(3, 32, 32)  # extract patches
+        patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(batch_size, 256, -1)
+
+        # Step 3: Project patches to embedding dimension
+        x = self.patch_embed(patches)  # (batch, 256, 1024)
+
+        # Step 5: Prepend CLS token
+        cls_tokens = self.cls_token.expand(batch_size, 1, -1)
+        x = torch.cat([cls_tokens, x], dim=1)  # (batch, 257, 1024)
+
+        # Step 4: Add positional embeddings
+        x = x + self.pos_embed
+
+        # Step 6: Transformer layers
+        x = self.transformer(x)  # (batch, 257, 1024)
+
+        return x  # Full sequence, or x[:, 0] for just CLS token
+```
+
+### How ViT is Trained
+
+The Vision Transformer is typically trained for image classification. The setup:
+
+1. **Dataset**: Images with labels (e.g., ImageNet with 1000 classes: "cat", "dog", "car", etc.)
+2. **Task**: Given an image, predict which class it belongs to
+3. **Output head**: A linear layer that maps the CLS token (1024-dim) to class logits (1000-dim for ImageNet)
+
+```python
+class ViTForClassification(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vit = VisionTransformer()
+        self.classifier = nn.Linear(1024, 1000)  # 1000 ImageNet classes
+
+    def forward(self, image):
+        features = self.vit(image)       # (batch, 257, 1024)
+        cls_output = features[:, 0]      # (batch, 1024) — just the CLS token
+        logits = self.classifier(cls_output)  # (batch, 1000)
+        return logits
+```
+
+**The loss function** is standard cross-entropy:
+
+```python
+# Training step
+logits = model(image)                    # (batch, 1000)
+loss = F.cross_entropy(logits, labels)   # labels is (batch,) of integers 0-999
+loss.backward()
+optimizer.step()
+```
+
+Cross-entropy loss pushes the model to assign high probability to the correct class and low probability to incorrect classes. The gradients flow back through the classifier, through the transformer layers, through the patch embedding, all the way to the learned weights. Over millions of images, the model learns:
+- What patch features matter (the patch embedding weights)
+- Where patches are spatially (the positional embeddings)
+- How patches relate to each other (the transformer attention weights)
+- How to aggregate information into the CLS token
+- What visual patterns correspond to which classes (the classifier weights)
 
 ### Connecting Vision to Language
 
@@ -116,13 +293,64 @@ The LLM processes this combined sequence with its normal attention mechanism. It
 
 ### LLaVA's Training Recipe
 
-LLaVA (Large Language and Vision Assistant) provides a clean example of how to train such a model. It uses a two-stage approach.
+LLaVA (Large Language and Vision Assistant) provides a clean example of how to train a multimodal model. The key insight: you don't need to train everything from scratch. You can take an already-trained vision encoder, an already-trained LLM, and just learn to connect them.
 
-**Stage 1: Feature Alignment.** Freeze both the vision encoder (CLIP ViT) and the LLM (Vicuna). Only train the projection layer. Use image-caption pairs: given the image tokens, predict the caption with standard language modeling loss. This teaches the projection layer to output vectors the LLM can interpret as meaningful content.
+LLaVA uses:
+- **Vision encoder**: A pretrained ViT from CLIP (we'll cover CLIP later—it's a vision model trained to understand images in relation to text)
+- **Language model**: Vicuna (a fine-tuned version of LLaMA)
+- **Projection layer**: A simple linear layer or MLP connecting them
 
-**Stage 2: Instruction Tuning.** Keep the vision encoder frozen, but now also train the LLM (or fine-tune it with LoRA). Use instruction-following data that includes images: "Describe what's happening in this image", "What color is the car?", etc. This teaches the model to follow instructions that involve visual understanding.
+The training happens in two stages.
 
-The key insight is that you don't need to train everything end-to-end from scratch. You can bootstrap from a good vision encoder (CLIP) and a good LLM (Vicuna), then just learn the connection between them.
+**Stage 1: Feature Alignment**
+
+In this stage, we "freeze" the vision encoder and the LLM—meaning we don't update their weights during training. We only train the projection layer. (Freezing is just setting `requires_grad=False` on those parameters, so gradients don't flow through them.)
+
+The training data is image-caption pairs: an image and a sentence describing it ("a cat sitting on a couch").
+
+The training process:
+1. Pass the image through the frozen vision encoder → get 257 vectors
+2. Pass those vectors through the projection layer (which we ARE training) → get 257 vectors in LLM space
+3. Feed those vectors to the frozen LLM, followed by a start token
+4. The LLM predicts the next token, then the next, then the next... generating the caption
+5. Compute cross-entropy loss between predicted tokens and actual caption tokens
+6. Backpropagate—but gradients only update the projection layer (since everything else is frozen)
+
+```python
+# Simplified training loop for stage 1
+for image, caption in dataset:
+    # Forward pass
+    vision_features = frozen_vit(image)          # no gradients here
+    projected = projection_layer(vision_features) # gradients flow here
+    logits = frozen_llm(projected, caption_tokens) # no gradients in LLM
+
+    # Loss: how well did we predict the caption?
+    loss = cross_entropy(logits, caption_tokens)
+
+    # Backward pass: only projection_layer weights update
+    loss.backward()
+    optimizer.step()
+```
+
+After this stage, the projection layer has learned to produce vectors that the LLM interprets as meaningful image content. When the LLM sees these vectors, it can "read" them as if they described the image.
+
+**Stage 2: Instruction Tuning**
+
+Now we unfreeze the LLM (or use LoRA, a technique that adds small trainable adapters without modifying the original weights). The vision encoder stays frozen.
+
+The training data changes: instead of just image-caption pairs, we use instruction-following conversations:
+
+```
+User: <image> What's in this image?
+Assistant: This image shows a cat sitting on a blue couch...
+
+User: <image> How many people are in this photo?
+Assistant: There are three people in the photo...
+```
+
+The model learns to follow instructions that involve visual reasoning. It's the same training process (predict next token, compute loss, backprop), but now the LLM weights also update, so it learns new capabilities specific to visual tasks.
+
+After both stages, the model can take an image and a question, and generate a relevant answer—it has become a vision-language model.
 
 ---
 

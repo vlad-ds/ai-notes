@@ -22,6 +22,25 @@ My primary reference is Andrej Karpathy's approach to explaining AI concepts. He
 - **Show the code**: Always include implementation. I understand by building.
 - **100% comprehension**: If something is unclear, break it down further rather than hand-waving
 
+## No Jargon Without Explanation
+
+**Every technical term must be explained when first used.** Don't assume the reader knows what a "convolution" is, what a "CLS token" is, or why we use "positional embeddings." If a term appears, explain it. If it's a concept from another domain (like convolutions from CNNs), give enough context that someone unfamiliar can follow.
+
+**No hand-waving.** Phrases like "we prepend a CLS token and add positional embeddings" are useless without explaining:
+- What is a CLS token? (A learnable vector that...)
+- Where exactly does it go? (Position 0 of the sequence...)
+- Why do we need it? (To aggregate information for...)
+- What are positional embeddings? (Vectors that encode position because...)
+- How are they added? (Element-wise addition to each token...)
+
+**Concrete steps, not vague summaries.** When describing a process, list the actual operations:
+1. Take input X
+2. Apply operation Y, producing Z
+3. The loss is computed as...
+4. Gradients flow back through...
+
+**Don't be afraid to write more.** Thoroughness beats brevity. If explaining something properly takes 500 words instead of 50, write the 500 words. These are learning materials, not tweets.
+
 ## Writing Style: Mini-Textbooks, Not Reference Notes
 
 These notes are how I learn, not quick references. Write them like mini-textbooks:
