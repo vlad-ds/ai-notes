@@ -503,25 +503,261 @@ What do those 257 vectors represent?
 
 For classification, we only used the CLS vector. But for multimodal LLMs, we often pass **all 257 vectors** to the language model. This gives the LLM access to spatially-localized information—it can "look at" specific regions when answering questions like "what color is the object in the top-right corner?"
 
-These don't match the LLM's embedding dimension. We need a projection layer that maps vision space into language space. The simplest version is just a linear layer:
+These don't match the LLM's embedding dimension. We need a projection layer that maps vision space into language space. There are three common approaches, each with different trade-offs.
+
+**Approach 1: Linear Projection**
+
+The simplest option is a single matrix multiplication:
 
 ```python
 vision_proj = nn.Linear(1024, 4096)
+
+# 257 vision vectors × 1024 dims → 257 vision vectors × 4096 dims
+projected = vision_proj(vision_features)  # (257, 4096)
 ```
 
-More sophisticated versions use an MLP or even cross-attention. But the principle is the same: learn a mapping that translates "what the vision encoder thinks this patch means" into "something the LLM can understand."
+Each vision vector gets independently transformed. The matrix learns a linear mapping from "CLIP's representation of a cat ear" to "the LLM's representation of a cat ear." Fast and simple, but limited to linear transformations.
 
-Once projected, the vision tokens are concatenated with the text tokens:
+**Approach 2: MLP (Multi-Layer Perceptron)**
+
+An MLP adds non-linearity by stacking layers with activation functions:
+
+```python
+vision_proj = nn.Sequential(
+    nn.Linear(1024, 2048),  # expand
+    nn.GELU(),               # non-linearity
+    nn.Linear(2048, 4096),  # project to LLM dimension
+)
+
+projected = vision_proj(vision_features)  # (257, 4096)
+```
+
+The GELU (or ReLU) activation lets the model learn non-linear relationships. Maybe "edge + texture" in vision space needs to combine in a complex way to become "fur" in language space. The MLP can learn this; a linear layer cannot.
+
+LLaVA uses a two-layer MLP for this reason. The extra capacity helps align the vision and language spaces better, at the cost of more parameters and slightly more compute.
+
+**Approach 3: Cross-Attention (Q-Former)**
+
+Linear and MLP projections preserve the number of tokens: 257 vision tokens become 257 projected tokens. But 257 tokens is a lot—that's context window the LLM could use for text.
+
+Cross-attention lets you *compress* the visual information into fewer tokens. The idea: create a fixed set of learnable "query" tokens that learn to extract the most important information from the vision features.
+
+```python
+class QFormer(nn.Module):
+    def __init__(self, num_queries=32, vision_dim=1024, output_dim=4096):
+        super().__init__()
+        # Learnable query tokens (like CLS, but multiple)
+        self.queries = nn.Parameter(torch.randn(num_queries, output_dim))  # (32, 4096)
+
+        # Cross-attention: queries attend to vision features
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=output_dim,
+            num_heads=16,
+            kdim=vision_dim,  # keys come from vision (1024-dim)
+            vdim=vision_dim   # values come from vision (1024-dim)
+        )
+
+    def forward(self, vision_features):
+        # vision_features: (257, 1024)
+        # self.queries: (32, 4096)
+
+        # Cross-attention: queries ask "what's relevant to me?"
+        # Keys and values come from vision features
+        output, _ = self.cross_attn(
+            query=self.queries,      # (32, 4096) - what I'm looking for
+            key=vision_features,      # (257, 1024) - what's available
+            value=vision_features     # (257, 1024) - what to retrieve
+        )
+        return output  # (32, 4096) — compressed!
+```
+
+The magic: 257 vision tokens become 32 query tokens. Each query learns to extract specific information—maybe query 1 focuses on "what objects are present," query 2 on "spatial layout," query 3 on "colors and textures," etc.
+
+BLIP-2 introduced Q-Former and showed it works remarkably well. You lose some spatial detail (32 tokens can't preserve all 257 patches' locations), but for many tasks that's fine—and the compression means more context window for the actual conversation.
+
+The trade-off between these approaches:
 
 ```
-Sequence fed to LLM:
-
-[img_1] [img_2] ... [img_257] [What] [is] [in] [this] [image] [?]
-   ↑                              ↑
-   └─ projected vision tokens     └─ regular text embeddings
+                    Tokens    Capacity    Speed
+Linear              257       low         fast
+MLP                 257       medium      fast
+Cross-attention     32        high        slower (attention compute)
 ```
 
-The LLM processes this combined sequence with its normal attention mechanism. It can attend to image tokens when predicting text, effectively "looking at" different parts of the image to form its response.
+Most current models use MLP because it's a good balance. Cross-attention is better when context window is precious or when you need to handle multiple images.
+
+**Special Tokens: How the LLM Knows It's Seeing an Image**
+
+When you concatenate vision and text tokens, the LLM needs to know where the image starts and ends. Otherwise it might interpret the 257 image vectors as a very long, strange word.
+
+Models solve this with special tokens that mark the boundaries:
+
+```
+Text prompt template:    "<image>\nWhat is in this image?"
+
+After processing:
+┌───────────────────────────────────────────────────────────────────────┐
+│ [<img>] [v_1] [v_2] ... [v_257] [</img>] [What] [is] [in] [this] ... │
+│    ↑      └──────────┬────────────┘   ↑     └────────┬────────────────┘
+│    │         projected vision tokens   │         text tokens
+│  start marker                       end marker
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+Different models use different conventions:
+
+```
+LLaVA:      <image> ... actual image tokens ... </image>
+Qwen-VL:    <img> ... </img>
+InternLM:   <ImageHere>
+```
+
+The special tokens are added to the tokenizer's vocabulary, so they have their own learnable embeddings. During training, the model learns that `<image>` means "image tokens follow" and `</image>` means "back to text now."
+
+**How this works in practice:**
+
+```python
+# The prompt template
+prompt = "<image>\nDescribe this image in detail."
+
+# Tokenize the text parts
+# Tokenizer splits this into: ["<image>", "\n", "Describe", "this", ...]
+tokens = tokenizer(prompt)
+
+# The <image> token is a placeholder. We need to replace it with actual image embeddings.
+# Find where <image> is in the token sequence
+image_token_id = tokenizer.convert_tokens_to_ids("<image>")
+image_position = tokens.index(image_token_id)
+
+# Get embeddings for all tokens
+text_embeds = embedding_layer(tokens)  # (seq_len, 4096)
+
+# Get projected image features
+image_embeds = vision_proj(vision_encoder(image))  # (257, 4096)
+
+# Insert image embeddings where <image> was
+final_embeds = torch.cat([
+    text_embeds[:image_position],           # tokens before <image>
+    image_embeds,                            # the 257 image tokens
+    text_embeds[image_position + 1:]        # tokens after <image>
+], dim=0)
+```
+
+Some models have multiple image slots:
+
+```
+"Compare <image> with <image>. What are the differences?"
+     first image ↑          ↑ second image
+```
+
+Each `<image>` placeholder gets replaced with its corresponding image's projected tokens.
+
+**Why special tokens matter for the model's understanding:**
+
+Without boundary markers, the model would see:
+
+```
+[v_1] [v_2] ... [v_257] [What] [is] [in] [this] [image]
+```
+
+The transition from image tokens to text tokens would be ambiguous. Is `[What]` part of the image? A weird patch? The model has to figure this out implicitly.
+
+With boundary markers:
+
+```
+[<img>] [v_1] [v_2] ... [v_257] [</img>] [What] [is] [in] ...
+```
+
+The model knows exactly: everything between `<img>` and `</img>` is visual information. Everything after `</img>` is the user's question. This explicit structure helps the model learn the correct attention patterns—attending to image tokens when reasoning about visual content, attending to text tokens when understanding the question.
+
+**How Attention Works During Generation**
+
+First, recall how autoregressive generation works for text-only models:
+
+```
+Step 1: Input "The cat"
+        Attention: "The" attends to [The], "cat" attends to [The, cat]
+        Predict next token → "sat"
+
+Step 2: Input "The cat sat"
+        Attention: each token attends to all previous tokens
+        Predict next → "on"
+
+And so on...
+```
+
+Each new token's queries attend to all previous tokens' keys and values. In practice, we use KV caching: we compute keys/values once for each token and cache them, so we don't recompute "The" and "cat"'s representations every step.
+
+Now add image tokens:
+
+```
+Input sequence:
+[<img>] [v_1] [v_2] ... [v_257] [</img>] [The] [cat]
+  0       1     2         257     258     259   260
+
+For predicting the next token after "cat":
+- "cat"'s query attends to keys from positions 0-260
+- That includes the 257 image token keys (v_1 through v_257)
+- The attention weights tell us "how much should 'cat' look at each image patch?"
+```
+
+**Do the image tokens keep changing?**
+
+Within a single forward pass through all transformer layers, yes—every token gets updated, including image tokens. In layer 1, `v_47` might represent "raw patch of cat ear." By layer 12, `v_47` has attended to neighboring patches and now represents "cat ear in context of full cat."
+
+But during **autoregressive generation** (generating one token at a time):
+
+```
+Generation step 1:
+┌──────────────────────────────────────────────────────────┐
+│ [<img>] [v_1]...[v_257] [</img>] [The]                   │
+│                                                          │
+│ Forward pass through all 32 layers:                      │
+│   - All tokens updated through layers                    │
+│   - Image tokens end up as rich representations          │
+│   - Predict next token → "cat"                           │
+│                                                          │
+│ Cache: store keys/values for ALL tokens (including img)  │
+└──────────────────────────────────────────────────────────┘
+
+Generation step 2:
+┌──────────────────────────────────────────────────────────┐
+│ Only process the NEW token: [cat]                        │
+│                                                          │
+│ For each layer:                                          │
+│   - "cat" computes query, key, AND value (first time)    │
+│   - "cat"'s key and value get ADDED to the cache         │
+│   - For attention: "cat"'s query attends to all cached   │
+│     keys (image tokens + previous text tokens + itself)  │
+│   - "cat" retrieves from cached values based on weights  │
+│   - "cat" gets updated, predict → "sat"                  │
+│                                                          │
+│ Image tokens don't recompute—their K/V is frozen in cache│
+│ But "cat"'s K/V is now cached for future tokens          │
+└──────────────────────────────────────────────────────────┘
+```
+
+The image tokens' keys and values are computed once (in the first forward pass) and cached. Every subsequent text token's queries attend to these cached image representations.
+
+What this means in practice:
+
+1. **Image tokens are "frozen" after initial processing**: Once we've done the initial forward pass with the image, each text token sees the same image representation. Generating "cat" doesn't update the cached image tokens.
+
+2. **Text tokens can selectively attend to image patches**: When generating "top-left corner", the model might assign high attention weight to `v_1` through `v_16` (the top-left patches). When generating "blue couch", it might attend heavily to patches containing the couch.
+
+3. **The attention pattern reveals what the model is "looking at"**: If you extract the attention weights from the last layer, you can see which image patches influenced each generated word. This is how interpretability tools visualize "where the model looked."
+
+```
+Generating "cat":
+                    Image patch attention weights
+        [v_1]  [v_2]  [v_3]  ...  [v_47] [v_48]  ...  [v_257]
+Token    0.01   0.01   0.01        0.15   0.14         0.02
+"cat"    └─ background patches ─┘  └─ cat patches ─┘
+
+The model attends heavily to patches 47-48 (where the cat is) when generating "cat"
+```
+
+This is why the projection layer matters so much—it determines how the image information is formatted in the keys and values that text tokens will attend to. A good projection means text tokens can easily retrieve relevant visual information through attention.
 
 ### LLaVA's Training Recipe
 
@@ -791,26 +1027,14 @@ In practice: first let each frame understand itself (spatial), then let the mode
 
 Every modality follows the same recipe:
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                                                                         │
-│  Modality         Encoder              Projection         LLM          │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                         │
-│  Image     →    ViT (patches)      →    Linear/MLP    →               │
-│  (H×W×3)        (256 × 1024)            (256 × 4096)      │           │
-│                                                            │           │
-│  Audio     →    Whisper encoder    →    Linear/MLP    →   │ Unified   │
-│  (mel spec)     (1500 × 512)            (1500 × 4096)     │ Transformer│
-│                                                            │           │
-│  Video     →    ViT + temporal     →    Linear/MLP    →   │           │
-│  (T×H×W×3)      (T×256 × 1024)          (T×256 × 4096)    │           │
-│                                                            │           │
-│  Text      →    Tokenizer          →    (identity)    →               │
-│  (string)       (S × 4096)              (S × 4096)                     │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+| Modality | Input | Encoder | Encoder Output | Projection | Final Output |
+|----------|-------|---------|----------------|------------|--------------|
+| Image | H×W×3 | ViT (patches) | 256 × 1024 | Linear/MLP | 256 × 4096 |
+| Audio | mel spectrogram | Whisper encoder | 1500 × 512 | Linear/MLP | 1500 × 4096 |
+| Video | T×H×W×3 | ViT + temporal | T×256 × 1024 | Linear/MLP | T×256 × 4096 |
+| Text | string | Tokenizer | S × 4096 | (identity) | S × 4096 |
+
+All outputs feed into the same unified transformer.
 
 The LLM sees everything as tokens in the same embedding space. It doesn't know which tokens came from images versus audio versus text—they're all just positions in the sequence to attend over.
 

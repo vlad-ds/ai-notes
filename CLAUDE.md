@@ -76,6 +76,14 @@ ASCII diagrams, tables for comparison, concrete examples—these often communica
 
 These are filler. If something is a key insight, just state it. The insight itself should make its importance obvious. Delete the throat-clearing and get to the point.
 
+**No dialogue artifacts.** Notes are standalone documents, not transcripts. Don't include phrases that reference a conversation:
+- "So you're exactly right:"
+- "To your specific question:"
+- "As I mentioned earlier..."
+- "Great question!"
+
+The reader has no context for who "you" is or what was said earlier. Write as if the reader is encountering the material fresh.
+
 ## Editing Process
 
 **Reread for global coherence after edits.** After making changes to a note, reread the entire document to ensure it still flows as a coherent whole. Incremental edits can create Frankenstein notes—redundant sections, inconsistent examples, or awkward transitions. If something feels off, fix it. If unsure whether a fix is right, ask.
