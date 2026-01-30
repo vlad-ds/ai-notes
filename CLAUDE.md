@@ -22,6 +22,30 @@ My primary reference is Andrej Karpathy's approach to explaining AI concepts. He
 - **Show the code**: Always include implementation. I understand by building.
 - **100% comprehension**: If something is unclear, break it down further rather than hand-waving
 
+## Writing Style: Mini-Textbooks, Not Reference Notes
+
+These notes are how I learn, not quick references. Write them like mini-textbooks:
+
+**Discursive paragraphs, not bullet points.** Explain things in flowing prose. Use paragraphs that walk through ideas, not lists of facts. The reader should feel like they're being taught, not scanning documentation.
+
+**Code is purposeful, not decorative.** Code is essential, but it has a reading cost. Every code block should earn its place. Surround code with explanation—what problem does it solve? What would you see if you ran it? Trace through concrete examples with actual numbers.
+
+**Visual explanations over walls of code.** When explaining a concept like "ViT splits images into patches," show it:
+
+```
+Original image (224×224):          After patching (14×14 patches of 16×16):
+┌────────────────────────┐         ┌──┬──┬──┬──┬──┬──┬──┐
+│                        │         │1 │2 │3 │4 │5 │6 │7 │ ... 14
+│     [photo of cat]     │   →     ├──┼──┼──┼──┼──┼──┼──┤
+│                        │         │15│16│17│  │  │  │  │
+│                        │         ├──┼──┼──┼──┼──┼──┼──┤
+└────────────────────────┘         │  │  │  │  │  │  │  │ ... 196 patches total
+```
+
+ASCII diagrams, tables for comparison, concrete examples—these often communicate better than another code block.
+
+**Conversational tone.** "You might think X, but actually Y." "Why doesn't this cause problems? Two reasons." "That's it." The writing should feel like a knowledgeable friend explaining something, not a textbook being formal.
+
 ## Mathematical Formulas
 
 I'm not fluent in mathematical notation. When formulas are necessary:

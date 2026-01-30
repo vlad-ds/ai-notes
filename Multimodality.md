@@ -1,635 +1,307 @@
 # Multimodality: How LLMs See, Hear, and Beyond
 
-## The Core Insight
+*Getting transformers to understand the world beyond text.*
 
-**Goal**: Get an LLM (which only understands sequences of vectors) to process images, audio, video, and any other modality.
+---
 
-**The fundamental principle**: Every modality must be converted into the same format the LLM already understands—a sequence of embedding vectors. That's it. The entire field of multimodal AI is about finding good ways to do this conversion.
+An LLM is, at its core, a machine that processes sequences of vectors. When you type "Hello world", the tokenizer converts it to token IDs, and the embedding layer converts those IDs into vectors. The transformer then attends over this sequence of vectors, updating them through layers until the final representation emerges.
+
+Here's the key insight that unlocks multimodality: the transformer doesn't actually care where those vectors came from. It just sees positions in a sequence, each carrying a d-dimensional vector. So if we could somehow convert an image, or an audio clip, or a video, into a sequence of vectors in the same space as text embeddings—the transformer would process them just like words.
+
+That's the entire trick. Every multimodal model, from GPT-4V to Whisper to video understanding systems, is doing some version of this:
 
 ```
-Image  → [encoder] → sequence of vectors → LLM
-Audio  → [encoder] → sequence of vectors → LLM
-Video  → [encoder] → sequence of vectors → LLM
-Text   → [tokenizer + embedding] → sequence of vectors → LLM
+Raw modality → Encoder → Sequence of vectors → Feed into LLM alongside text
 ```
 
-The LLM doesn't know or care where the vectors came from. To the transformer, they're all just positions in a sequence to attend to.
+The rest of this chapter is about how to build good encoders for different modalities.
 
 ---
 
 ## Part 1: Vision — Teaching Models to See
 
-### The Simplest Approach That Could Work
+### The Naive Approach
 
-What if we just... flattened the image into pixels and fed them as tokens?
+What if we just treated pixels as tokens? A 224×224 RGB image has 224 × 224 × 3 = 150,528 values. We could flatten this into a sequence and feed it to the transformer.
 
-```python
-# Naive approach: each pixel is a token
-image = load_image("cat.jpg")  # shape: (224, 224, 3)
-pixels = image.flatten()        # shape: (150528,)
-# Feed 150,528 tokens to the LLM...
+This fails spectacularly, for two reasons. First, quadratic attention on 150K tokens would require 22.5 billion attention computations per layer—completely impractical. Second, individual pixels carry almost no semantic meaning. Knowing that pixel (47, 123) is slightly reddish tells you nothing about what's in the image. You need to see patterns across many pixels to recognize "this is an eye" or "this is a tree."
+
+### The Vision Transformer: Patches as Tokens
+
+The breakthrough came in 2020 with the Vision Transformer (ViT). The idea is simple: instead of treating each pixel as a token, treat each 16×16 patch of the image as a token.
+
+```
+Original image (224×224):              Divided into patches:
+
+┌──────────────────────────────┐       ┌───┬───┬───┬───┬───┬───┬───┐
+│                              │       │ 1 │ 2 │ 3 │ 4 │ 5 │ 6 │ 7 │← 14 patches across
+│                              │       ├───┼───┼───┼───┼───┼───┼───┤
+│        (a photo of           │  →    │ 8 │ 9 │...│   │   │   │   │
+│         something)           │       ├───┼───┼───┼───┼───┼───┼───┤
+│                              │       │   │   │   │   │   │   │   │← 14 patches down
+│                              │       ├───┼───┼───┼───┼───┼───┼───┤
+└──────────────────────────────┘       │   │   │   │   │   │   │196│
+                                       └───┴───┴───┴───┴───┴───┴───┘
+
+                                       196 patches total, each 16×16 pixels
 ```
 
-**Why this breaks**:
-- 150K tokens for one small image (quadratic attention = dead)
-- Individual pixels carry almost no semantic meaning
-- No spatial structure preserved
-
-### The Solution: Vision Transformer (ViT)
-
-The breakthrough idea (2020): treat an image as a sequence of patches, not pixels.
+A 224×224 image becomes 14×14 = 196 patches. Each patch contains 16 × 16 × 3 = 768 values. We project each patch through a linear layer to get a 768-dimensional embedding vector.
 
 ```python
-import torch
-import torch.nn as nn
+# The entire patch embedding is just one convolution
+self.proj = nn.Conv2d(
+    in_channels=3,      # RGB
+    out_channels=768,   # embedding dimension
+    kernel_size=16,     # patch size
+    stride=16           # non-overlapping patches
+)
 
-class PatchEmbedding(nn.Module):
-    """Convert image into a sequence of patch embeddings."""
-
-    def __init__(self, img_size=224, patch_size=16, in_channels=3, embed_dim=768):
-        super().__init__()
-        self.patch_size = patch_size
-        self.n_patches = (img_size // patch_size) ** 2  # 196 patches for 224x224
-
-        # Single conv layer does patch extraction + linear projection in one step
-        self.proj = nn.Conv2d(
-            in_channels,
-            embed_dim,
-            kernel_size=patch_size,
-            stride=patch_size
-        )
-
-    def forward(self, x):
-        # x: (batch, 3, 224, 224)
-        x = self.proj(x)           # (batch, 768, 14, 14)
-        x = x.flatten(2)           # (batch, 768, 196)
-        x = x.transpose(1, 2)      # (batch, 196, 768)
-        return x
-
-# Now we have 196 tokens instead of 150K
-patch_embed = PatchEmbedding()
-image = torch.randn(1, 3, 224, 224)
-patches = patch_embed(image)
-print(patches.shape)  # (1, 196, 768) — manageable!
+# Input: (batch, 3, 224, 224)
+# Output: (batch, 768, 14, 14) → reshape to (batch, 196, 768)
 ```
 
-**What each patch captures**:
-- A 16x16 region of the image
-- Each patch token represents a semantic chunk (part of an eye, edge of a table, etc.)
-- 196 tokens is comparable to a short text sequence
+Now we have 196 tokens instead of 150K—a 750× reduction. And each token represents a semantic chunk of the image (part of an eye, an edge of a table, a patch of sky) rather than a meaningless single pixel.
 
-### Full Vision Transformer
+The rest of the Vision Transformer is just a standard transformer encoder. We prepend a learnable CLS token (like BERT), add positional embeddings, and run transformer layers. The output is a sequence of 197 vectors, each 768-dimensional.
+
+### Connecting Vision to Language
+
+Here's where multimodality actually happens. We have:
+
+- Vision encoder output: 197 vectors of dimension 768
+- LLM embedding space: vectors of dimension 4096 (for a typical 7B model)
+
+These don't match. We need a projection layer that maps vision space into language space. The simplest version is just a linear layer:
 
 ```python
-class VisionTransformer(nn.Module):
-    """Simplified ViT for understanding the architecture."""
-
-    def __init__(
-        self,
-        img_size=224,
-        patch_size=16,
-        in_channels=3,
-        embed_dim=768,
-        n_layers=12,
-        n_heads=12
-    ):
-        super().__init__()
-        self.patch_embed = PatchEmbedding(img_size, patch_size, in_channels, embed_dim)
-        n_patches = (img_size // patch_size) ** 2
-
-        # CLS token: a learnable vector prepended to the sequence
-        # Used to aggregate information for classification
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        # Position embeddings: learned, not sinusoidal (works better for images)
-        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, embed_dim))
-
-        # Standard transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=n_heads,
-            dim_feedforward=embed_dim * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-    def forward(self, x):
-        batch_size = x.shape[0]
-
-        # Patch embedding
-        x = self.patch_embed(x)  # (batch, 196, 768)
-
-        # Prepend CLS token
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)  # (batch, 197, 768)
-
-        # Add position embeddings
-        x = x + self.pos_embed
-
-        # Transform
-        x = self.transformer(x)  # (batch, 197, 768)
-
-        return x  # Full sequence, or x[:, 0] for just CLS token
-
-vit = VisionTransformer()
-image = torch.randn(1, 3, 224, 224)
-output = vit(image)
-print(output.shape)  # (1, 197, 768)
+vision_proj = nn.Linear(768, 4096)
 ```
 
-### Connecting Vision to Language: The Projection Layer
+More sophisticated versions use an MLP or even cross-attention. But the principle is the same: learn a mapping that translates "what the vision encoder thinks this patch means" into "something the LLM can understand."
 
-Here's where multimodality happens. We have:
-- Vision encoder output: (batch, 197, 768)
-- LLM expects: (batch, seq_len, 4096) for a typical 7B model
+Once projected, the vision tokens are concatenated with the text tokens:
 
-**Solution**: Learn a projection that maps vision space → language space.
+```
+Sequence fed to LLM:
 
-```python
-class VisionLanguageConnector(nn.Module):
-    """Projects vision embeddings into the LLM's embedding space."""
-
-    def __init__(self, vision_dim=768, llm_dim=4096):
-        super().__init__()
-        # Simple: single linear projection
-        # More complex: MLP, cross-attention, etc.
-        self.proj = nn.Sequential(
-            nn.Linear(vision_dim, llm_dim),
-            nn.GELU(),
-            nn.Linear(llm_dim, llm_dim)
-        )
-
-    def forward(self, vision_features):
-        return self.proj(vision_features)
-
-# Vision tokens now live in the same space as text tokens
-connector = VisionLanguageConnector()
-vision_tokens = connector(output)  # (1, 197, 4096)
+[img_1] [img_2] ... [img_197] [What] [is] [in] [this] [image] [?]
+   ↑                              ↑
+   └─ projected vision tokens     └─ regular text embeddings
 ```
 
-### Putting It Together: A Multimodal LLM
+The LLM processes this combined sequence with its normal attention mechanism. It can attend to image tokens when predicting text, effectively "looking at" different parts of the image to form its response.
 
-```python
-class SimpleVisionLLM(nn.Module):
-    """Conceptual architecture of models like LLaVA, GPT-4V."""
+### LLaVA's Training Recipe
 
-    def __init__(self, vision_encoder, connector, llm):
-        super().__init__()
-        self.vision_encoder = vision_encoder  # Frozen or fine-tuned
-        self.connector = connector             # Trained
-        self.llm = llm                         # Frozen or fine-tuned
+LLaVA (Large Language and Vision Assistant) provides a clean example of how to train such a model. It uses a two-stage approach.
 
-    def forward(self, image, text_tokens):
-        # 1. Encode the image
-        vision_features = self.vision_encoder(image)  # (batch, 197, 768)
+**Stage 1: Feature Alignment.** Freeze both the vision encoder (CLIP ViT) and the LLM (Vicuna). Only train the projection layer. Use image-caption pairs: given the image tokens, predict the caption with standard language modeling loss. This teaches the projection layer to output vectors the LLM can interpret as meaningful content.
 
-        # 2. Project to LLM space
-        vision_tokens = self.connector(vision_features)  # (batch, 197, 4096)
+**Stage 2: Instruction Tuning.** Keep the vision encoder frozen, but now also train the LLM (or fine-tune it with LoRA). Use instruction-following data that includes images: "Describe what's happening in this image", "What color is the car?", etc. This teaches the model to follow instructions that involve visual understanding.
 
-        # 3. Embed the text
-        text_embeddings = self.llm.embed_tokens(text_tokens)  # (batch, text_len, 4096)
-
-        # 4. Concatenate: [vision tokens] [text tokens]
-        combined = torch.cat([vision_tokens, text_embeddings], dim=1)
-
-        # 5. Run through LLM
-        output = self.llm(inputs_embeds=combined)
-
-        return output
-```
-
-**The key insight**: The LLM sees `[img_token_1, img_token_2, ..., img_token_197, "What", "is", "in", "this", "image", "?"]`. It attends to all positions equally. The vision tokens are just... tokens.
-
-### Training Strategy: LLaVA as Case Study
-
-LLaVA (Large Language and Vision Assistant) shows a practical training recipe:
-
-**Stage 1: Feature Alignment (Pretraining)**
-- Freeze vision encoder AND LLM
-- Only train the connector
-- Use image-caption pairs
-- Goal: Teach the connector to produce embeddings the LLM can understand
-
-```python
-# Pseudocode for stage 1
-for image, caption in image_caption_dataset:
-    vision_tokens = connector(frozen_vision_encoder(image))
-    text_tokens = tokenizer(caption)
-
-    # Standard language modeling loss
-    # Given vision tokens, predict the caption
-    loss = llm.forward(
-        inputs_embeds=cat([vision_tokens, text_tokens]),
-        labels=text_tokens
-    )
-    loss.backward()
-    optimizer.step()  # Only updates connector
-```
-
-**Stage 2: Instruction Tuning**
-- Freeze vision encoder
-- Train connector AND LLM
-- Use instruction-following data with images
-- Goal: Teach the model to follow instructions about images
+The key insight is that you don't need to train everything end-to-end from scratch. You can bootstrap from a good vision encoder (CLIP) and a good LLM (Vicuna), then just learn the connection between them.
 
 ---
 
 ## Part 2: Audio — How Whisper Works
 
-### The Challenge
+Audio presents different challenges than images. It's inherently temporal—a 30-second clip has 30 seconds of sequential information. It's dense—standard audio is 16,000 samples per second. And it's variable length—unlike images which we can resize to 224×224, audio clips range from milliseconds to hours.
 
-Audio is fundamentally different from images:
-- Temporal: unfolds over time
-- Variable length: a clip can be 1 second or 1 hour
-- Dense information: 16,000 samples per second for standard audio
+### From Waveform to Mel Spectrogram
 
-### Step 1: Convert Audio to Mel Spectrogram
+Raw audio is just amplitude values over time. If you plot it, you see a wiggly line:
 
-Raw audio is just amplitude over time—not very useful for neural networks. The mel spectrogram converts audio into a time-frequency representation.
+```
+Raw waveform (amplitude vs time):
 
-```python
-import torch
-import torchaudio
-
-def audio_to_mel_spectrogram(waveform, sample_rate=16000):
-    """
-    Convert raw audio waveform to mel spectrogram.
-
-    What this does:
-    1. Split audio into overlapping windows
-    2. Compute FFT on each window → frequency content
-    3. Apply mel filterbank → human-perceptual frequency scale
-    4. Take log → compress dynamic range
-    """
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sample_rate,
-        n_fft=400,           # Window size for FFT (25ms at 16kHz)
-        hop_length=160,      # Step between windows (10ms at 16kHz)
-        n_mels=80            # Number of mel frequency bins
-    )
-
-    mel_spec = mel_transform(waveform)
-
-    # Log scale (standard for audio)
-    log_mel = torch.log(mel_spec + 1e-10)
-
-    return log_mel
-
-# Example
-waveform = torch.randn(1, 16000 * 30)  # 30 seconds of audio
-mel = audio_to_mel_spectrogram(waveform)
-print(mel.shape)  # (1, 80, 3000) — 80 frequency bins, 3000 time steps
+     ↑
+     │    ╱╲      ╱╲
+     │   ╱  ╲    ╱  ╲    ╱╲
+  0  │──╱────╲──╱────╲──╱──╲──────
+     │        ╲╱      ╲╱    ╲╱
+     │
+     └────────────────────────────→ time
 ```
 
-**Intuition**: The mel spectrogram is like a "picture" of the audio where:
-- X-axis = time
-- Y-axis = frequency (mel-scaled to match human hearing)
-- Brightness = energy at that time-frequency point
+This representation isn't great for neural networks. A slight time shift changes all the values even though the sound is perceptually identical. And there's no clear structure—just a sequence of numbers.
 
-### Step 2: Whisper Architecture
+The mel spectrogram transforms audio into a time-frequency representation. Think of it as a "picture" of the sound:
 
-Whisper is an encoder-decoder transformer (like the original "Attention Is All You Need" architecture).
-
-```python
-class WhisperEncoder(nn.Module):
-    """
-    Encodes mel spectrogram into a sequence of hidden states.
-    """
-
-    def __init__(self, n_mels=80, n_ctx=1500, d_model=512, n_heads=8, n_layers=6):
-        super().__init__()
-
-        # Two conv layers to downsample time dimension
-        self.conv1 = nn.Conv1d(n_mels, d_model, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
-
-        # Positional embedding for the sequence
-        self.positional_embedding = nn.Embedding(n_ctx, d_model)
-
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-    def forward(self, mel):
-        # mel: (batch, 80, time_steps) — e.g., (batch, 80, 3000)
-
-        # Conv layers: extract features and downsample
-        x = torch.gelu(self.conv1(mel))   # (batch, 512, 3000)
-        x = torch.gelu(self.conv2(x))     # (batch, 512, 1500) — stride=2 halves time
-
-        x = x.transpose(1, 2)  # (batch, 1500, 512) — sequence format
-
-        # Add positional embeddings
-        positions = torch.arange(x.shape[1], device=x.device)
-        x = x + self.positional_embedding(positions)
-
-        # Transform
-        x = self.transformer(x)
-
-        return x  # (batch, 1500, 512)
-
-
-class WhisperDecoder(nn.Module):
-    """
-    Autoregressively generates text tokens from encoder output.
-    """
-
-    def __init__(self, vocab_size=51865, n_ctx=448, d_model=512, n_heads=8, n_layers=6):
-        super().__init__()
-
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.positional_embedding = nn.Embedding(n_ctx, d_model)
-
-        # Transformer decoder with cross-attention to encoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=n_layers)
-
-        self.ln_final = nn.LayerNorm(d_model)
-        self.proj = nn.Linear(d_model, vocab_size, bias=False)
-
-    def forward(self, tokens, encoder_output):
-        # tokens: (batch, seq_len) — previously generated tokens
-        # encoder_output: (batch, 1500, 512) — from encoder
-
-        # Embed tokens
-        x = self.token_embedding(tokens)  # (batch, seq_len, 512)
-        positions = torch.arange(tokens.shape[1], device=tokens.device)
-        x = x + self.positional_embedding(positions)
-
-        # Causal mask for autoregressive decoding
-        seq_len = tokens.shape[1]
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
-
-        # Decode with cross-attention to encoder
-        x = self.transformer(
-            x,
-            encoder_output,
-            tgt_mask=causal_mask.to(x.device)
-        )
-
-        x = self.ln_final(x)
-        logits = self.proj(x)  # (batch, seq_len, vocab_size)
-
-        return logits
-
-
-class Whisper(nn.Module):
-    """Complete Whisper model."""
-
-    def __init__(self):
-        super().__init__()
-        self.encoder = WhisperEncoder()
-        self.decoder = WhisperDecoder()
-
-    def forward(self, mel, tokens):
-        encoder_output = self.encoder(mel)
-        logits = self.decoder(tokens, encoder_output)
-        return logits
-
-    def transcribe(self, mel, max_len=448):
-        """Generate transcription autoregressively."""
-        encoder_output = self.encoder(mel)
-
-        # Start with start-of-transcript token
-        tokens = torch.tensor([[50258]])  # <|startoftranscript|>
-
-        for _ in range(max_len):
-            logits = self.decoder(tokens, encoder_output)
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            tokens = torch.cat([tokens, next_token], dim=1)
-
-            if next_token.item() == 50257:  # <|endoftext|>
-                break
-
-        return tokens
 ```
+Mel spectrogram:
+
+Frequency ↑  ┌─────────────────────────────────┐
+(mel scale)  │░░▓▓░░░░░▓▓▓░░░░░░▓░░░░░░░░░░░░░│← high frequencies
+             │░▓▓▓░░░░▓▓▓▓▓░░░░▓▓▓░░░░░░░░░░░░│
+             │▓▓▓▓▓░░▓▓▓▓▓▓▓░░▓▓▓▓▓░░░░░░░░░░░│
+             │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░│← low frequencies
+             └─────────────────────────────────┘
+                    time →
+
+             Darker = more energy at that frequency/time
+```
+
+Each column is a "snapshot" of which frequencies are present at that moment. The y-axis uses a mel scale, which compresses frequencies in a way that matches human perception (we're more sensitive to differences in low frequencies than high frequencies).
+
+The conversion involves:
+1. Split audio into overlapping windows (typically 25ms windows, 10ms apart)
+2. Compute FFT on each window to get frequency content
+3. Apply mel filterbank to compress to 80 frequency bins
+4. Take log to compress dynamic range
+
+For 30 seconds of audio at 16kHz, with 10ms hop length, we get 3000 time steps × 80 frequency bins.
+
+### Whisper's Architecture
+
+Whisper is an encoder-decoder transformer, like the original "Attention Is All You Need" architecture:
+
+```
+                    ┌──────────────┐
+Mel spectrogram →   │   Encoder    │ → Hidden states (1500 × dim)
+(80 × 3000)         │ (transformer)│        │
+                    └──────────────┘        │ cross-attention
+                                            ↓
+                    ┌──────────────┐   ┌──────────────┐
+                    │   Decoder    │ → │  Text tokens │
+                    │ (transformer)│   │  (output)    │
+                    └──────────────┘   └──────────────┘
+                           ↑
+                    Previous tokens
+                    (autoregressive)
+```
+
+The encoder processes the mel spectrogram. It starts with two convolutional layers that halve the time dimension (3000 → 1500 time steps), then runs transformer encoder layers. The output is 1500 vectors, each representing roughly 20ms of audio.
+
+The decoder generates text autoregressively, attending to both its own previous outputs (causal self-attention) and the encoder outputs (cross-attention). This is how it "reads" the audio while generating the transcription.
 
 ### What Makes Whisper Special
 
-**1. Massive Weakly-Supervised Training**
-- 680,000 hours of audio-text pairs from the internet
-- No manual transcription needed—scraped from subtitles, captions, etc.
-- The scale overcomes noise in the data
+Three things make Whisper exceptional:
 
-**2. Multitask Training with Special Tokens**
+**Massive weakly-supervised training.** OpenAI trained Whisper on 680,000 hours of audio with transcriptions scraped from the internet—YouTube subtitles, podcast transcripts, etc. This data is noisy (subtitles often have errors), but the scale overcomes the noise. The model learns to ignore labeling mistakes because they're inconsistent, while correct patterns are reinforced.
 
-Whisper uses special tokens to specify the task:
+**Multitask training with special tokens.** Whisper learns multiple tasks through prompt tokens:
 
-```python
-# Token sequence for English transcription:
-# <|startoftranscript|><|en|><|transcribe|><|notimestamps|> ... text ...
+```
+English transcription:
+<|startoftranscript|><|en|><|transcribe|><|notimestamps|> The quick brown fox...
 
-# Token sequence for translation to English:
-# <|startoftranscript|><|es|><|translate|><|notimestamps|> ... english text ...
+Spanish → English translation:
+<|startoftranscript|><|es|><|translate|><|notimestamps|> The quick brown fox...
 
-# Token sequence with timestamps:
-# <|startoftranscript|><|en|><|transcribe|><|0.00|> Hello <|2.50|> world <|4.00|>
-
-SPECIAL_TOKENS = {
-    "<|startoftranscript|>": 50258,
-    "<|endoftext|>": 50257,
-    "<|transcribe|>": 50359,
-    "<|translate|>": 50358,
-    "<|notimestamps|>": 50363,
-    # Language tokens: <|en|>, <|es|>, <|fr|>, etc.
-}
+Transcription with timestamps:
+<|startoftranscript|><|en|><|transcribe|><|0.00|> The <|2.50|> quick <|3.10|> brown...
 ```
 
-**3. Input Normalization**
-- Fixed 30-second audio chunks
-- Shorter audio is padded with silence
-- Longer audio is processed in chunks
+The decoder learns to look at these special tokens to determine what task it's performing. Same model, different behavior based on the prompt.
 
-```python
-def pad_or_trim(mel, target_length=3000):
-    """Ensure consistent input size."""
-    if mel.shape[-1] > target_length:
-        mel = mel[..., :target_length]
-    elif mel.shape[-1] < target_length:
-        pad = target_length - mel.shape[-1]
-        mel = torch.nn.functional.pad(mel, (0, pad))
-    return mel
-```
+**Fixed 30-second chunks.** Whisper always processes exactly 30 seconds of audio. Shorter clips are padded with silence; longer recordings are processed in 30-second windows. This simplifies the architecture (fixed-size inputs) at the cost of some context loss at chunk boundaries.
 
-### Using Whisper in Practice
+### Using Whisper
 
 ```python
 import whisper
 
-# Load model (tiny, base, small, medium, large)
-model = whisper.load_model("base")
-
-# Transcribe
+model = whisper.load_model("base")  # tiny, base, small, medium, large
 result = model.transcribe("audio.mp3")
 print(result["text"])
-
-# With options
-result = model.transcribe(
-    "audio.mp3",
-    language="en",           # Force language (or auto-detect)
-    task="transcribe",       # or "translate" for translation to English
-    fp16=True,               # Use half precision for speed
-    word_timestamps=True     # Get word-level timing
-)
 ```
+
+That's it. The model handles language detection, transcription, and even translation (any language → English) automatically.
 
 ---
 
 ## Part 3: Connecting Audio to LLMs
 
-### The Pattern Should Look Familiar
+You've probably noticed the pattern by now. Whisper's encoder produces a sequence of vectors (1500 × 512 for the base model). To connect this to an LLM, we just need a projection layer:
 
-Just like vision, we need to project audio representations into the LLM's embedding space:
-
-```python
-class AudioLanguageConnector(nn.Module):
-    """Projects Whisper encoder output into LLM space."""
-
-    def __init__(self, whisper_dim=512, llm_dim=4096):
-        super().__init__()
-        # Could also use a more complex adapter (Q-Former, etc.)
-        self.proj = nn.Linear(whisper_dim, llm_dim)
-
-    def forward(self, audio_features):
-        return self.proj(audio_features)
-
-
-class AudioLLM(nn.Module):
-    """Conceptual audio-language model."""
-
-    def __init__(self, whisper_encoder, connector, llm):
-        super().__init__()
-        self.whisper_encoder = whisper_encoder
-        self.connector = connector
-        self.llm = llm
-
-    def forward(self, mel, text_tokens):
-        # 1. Encode audio
-        audio_features = self.whisper_encoder(mel)  # (batch, 1500, 512)
-
-        # 2. Project to LLM space
-        audio_tokens = self.connector(audio_features)  # (batch, 1500, 4096)
-
-        # 3. Embed text
-        text_embeddings = self.llm.embed_tokens(text_tokens)
-
-        # 4. Concatenate
-        combined = torch.cat([audio_tokens, text_embeddings], dim=1)
-
-        # 5. Run through LLM
-        return self.llm(inputs_embeds=combined)
+```
+Whisper encoder output     Projection       LLM embedding space
+   (1500 × 512)        →   (linear)     →     (1500 × 4096)
 ```
 
-### GPT-4o's Approach: Native Multimodality
+Then concatenate with text embeddings, exactly like we did for images:
 
-GPT-4o (Omni) took a different approach than the "encoder + projection" pattern:
+```
+[audio_1] [audio_2] ... [audio_1500] [What] [did] [they] [say] [?]
+```
 
-**Traditional approach** (GPT-4V, most open-source):
-- Separate specialized encoders for each modality
-- Projection layers to map into LLM space
-- LLM trained primarily on text, adapted to other modalities
+Models like Qwen-Audio and SALMONN follow this pattern. The main question is whether to keep the Whisper encoder frozen or fine-tune it alongside the projection layer.
 
-**Native multimodality** (GPT-4o):
-- Single model trained from scratch on all modalities
-- All modalities tokenized similarly
-- Joint embedding space learned during pretraining
+### GPT-4o: Native Multimodality
 
-This is why GPT-4o has such low latency for voice—it's not running separate ASR → LLM → TTS pipeline, it's processing audio natively.
+GPT-4o takes a fundamentally different approach. Instead of bolting specialized encoders onto an LLM, it was trained from scratch on all modalities simultaneously.
+
+The difference in architecture:
+
+```
+Traditional (GPT-4V, LLaVA, etc.):
+
+Image → [CLIP ViT] → [projection] → ┐
+                                    ├─→ [LLM] → text
+Audio → [Whisper]  → [projection] → ┘
+Text  → [tokenizer] ────────────────┘
+
+
+Native multimodality (GPT-4o):
+
+Image → [learned tokenizer] → ┐
+                              │
+Audio → [learned tokenizer] → ├─→ [Single unified model] → any modality
+                              │
+Text  → [learned tokenizer] → ┘
+```
+
+In the traditional approach, the LLM was pretrained on text, and vision/audio understanding is "bolted on" through projection layers. The modalities live in somewhat separate spaces.
+
+In GPT-4o, all modalities are processed by the same weights from the beginning. The model learns unified representations where images, audio, and text naturally interrelate. This is why GPT-4o has such low latency for voice—it's not running a pipeline (ASR → LLM → TTS), it's processing audio directly and generating audio directly.
+
+The downside: native multimodality requires vastly more compute to train. You're learning vision, audio, and language understanding all at once, rather than leveraging pretrained specialists.
 
 ---
 
-## Part 4: Video — Adding the Time Dimension
+## Part 4: Video — Time Makes Everything Harder
 
-### The Challenge
+Video is images plus time. A 10-second clip at 30fps has 300 frames. If each frame becomes 196 tokens (like ViT), that's 58,800 tokens per video—far too many for practical attention.
 
-Video = sequence of images + temporal relationships
+The core challenge is how to capture temporal information without exploding the token count.
 
-```python
-# A 10-second video at 30fps
-frames = 300
-# If each frame becomes 196 tokens...
-total_tokens = 300 * 196  # = 58,800 tokens per video
+### Temporal Sampling
+
+The simplest approach: don't use every frame. Sample 8-16 frames uniformly across the video:
+
+```
+Original video: 300 frames
+                ▼
+Sample uniformly: frames 0, 37, 75, 112, 150, 187, 225, 262
+                ▼
+Result: 8 frames × 196 patches = 1,568 tokens ✓
 ```
 
-### Solutions
+This works surprisingly well for many tasks. Most videos have redundancy—consecutive frames are nearly identical. Sampling every ~40 frames (at 30fps, that's ~1.3 seconds between samples) often captures the essential information.
 
-**1. Temporal Sampling**: Don't use every frame
+### Temporal Modeling
 
-```python
-def sample_frames(video, n_frames=8):
-    """Sample n frames uniformly from video."""
-    total_frames = len(video)
-    indices = torch.linspace(0, total_frames - 1, n_frames).long()
-    return video[indices]
+Sampling reduces tokens, but loses fine-grained temporal information. What if something important happens between sampled frames? Or what if the order of events matters?
 
-# 8 frames x 196 tokens = 1,568 tokens — manageable
+Video-specific architectures like TimeSformer handle this with "divided space-time attention":
+
+```
+Standard attention: every token attends to every other token
+                   O(N²) where N = frames × patches
+
+Divided attention:
+  1. Spatial attention: patches within each frame attend to each other
+     O(F × P²) where F = frames, P = patches per frame
+
+  2. Temporal attention: same patch position across frames attend to each other
+     O(P × F²)
+
+Total: O(F × P² + P × F²) << O((F × P)²)
 ```
 
-**2. Temporal Pooling**: Compress across time
-
-```python
-class TemporalPooling(nn.Module):
-    """Pool vision features across time dimension."""
-
-    def __init__(self, n_frames=8, pool_size=4):
-        super().__init__()
-        self.pool = nn.AvgPool1d(kernel_size=pool_size, stride=pool_size)
-
-    def forward(self, frame_features):
-        # frame_features: (batch, n_frames, n_patches, dim)
-        # Reshape and pool across frames
-        b, t, n, d = frame_features.shape
-        x = frame_features.transpose(1, 2)  # (batch, n_patches, n_frames, dim)
-        x = x.reshape(b * n, t, d)
-        x = self.pool(x.transpose(1, 2)).transpose(1, 2)
-        x = x.reshape(b, n, -1, d)
-        return x.transpose(1, 2)  # (batch, n_frames/pool_size, n_patches, dim)
-```
-
-**3. Video-Specific Architectures**: ViViT, TimeSformer
-
-```python
-# TimeSformer approach: divided space-time attention
-class TimeSformerBlock(nn.Module):
-    """Alternates between spatial and temporal attention."""
-
-    def __init__(self, dim, n_heads):
-        super().__init__()
-        self.temporal_attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
-        self.spatial_attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-
-    def forward(self, x, n_frames, n_patches):
-        # x: (batch, n_frames * n_patches, dim)
-        b, _, d = x.shape
-
-        # Temporal attention: attend across frames for each patch position
-        x_t = x.view(b, n_frames, n_patches, d)
-        x_t = x_t.permute(0, 2, 1, 3).reshape(b * n_patches, n_frames, d)
-        x_t = self.temporal_attn(x_t, x_t, x_t)[0]
-        x_t = x_t.view(b, n_patches, n_frames, d).permute(0, 2, 1, 3).reshape(b, -1, d)
-        x = self.norm1(x + x_t)
-
-        # Spatial attention: attend across patches for each frame
-        x_s = x.view(b, n_frames, n_patches, d)
-        x_s = x_s.reshape(b * n_frames, n_patches, d)
-        x_s = self.spatial_attn(x_s, x_s, x_s)[0]
-        x_s = x_s.view(b, n_frames, n_patches, d).reshape(b, -1, d)
-        x = self.norm2(x + x_s)
-
-        return x
-```
+In practice: first let each frame understand itself (spatial), then let the model track how things change over time (temporal). This factorization makes video attention tractable.
 
 ---
 
@@ -638,260 +310,91 @@ class TimeSformerBlock(nn.Module):
 Every modality follows the same recipe:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│   Raw Input        Encoder           Projection      LLM       │
-│   ──────────────────────────────────────────────────────────   │
-│                                                                 │
-│   Image      →   ViT           →   Linear/MLP   →             │
-│   (H,W,C)        (N, d_vision)     (N, d_llm)      Shared      │
-│                                                     Transformer │
-│   Audio      →   Whisper Enc   →   Linear/MLP   →  (with       │
-│   (mel)          (T, d_audio)      (T, d_llm)      cross-modal │
-│                                                     attention)  │
-│   Video      →   ViViT         →   Linear/MLP   →             │
-│   (T,H,W,C)      (T*N, d_vid)      (T*N, d_llm)               │
-│                                                                 │
-│   Text       →   Tokenizer+Emb →   (identity)   →             │
-│   (string)       (S, d_llm)        (S, d_llm)                  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  Modality         Encoder              Projection         LLM          │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Image     →    ViT (patches)      →    Linear/MLP    →               │
+│  (H×W×3)        (196 × 768)             (196 × 4096)      │           │
+│                                                            │           │
+│  Audio     →    Whisper encoder    →    Linear/MLP    →   │ Unified   │
+│  (mel spec)     (1500 × 512)            (1500 × 4096)     │ Transformer│
+│                                                            │           │
+│  Video     →    ViT + temporal     →    Linear/MLP    →   │           │
+│  (T×H×W×3)      (T×196 × 768)           (T×196 × 4096)    │           │
+│                                                            │           │
+│  Text      →    Tokenizer          →    (identity)    →               │
+│  (string)       (S × 4096)              (S × 4096)                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Design Decisions
+The LLM sees everything as tokens in the same embedding space. It doesn't know which tokens came from images versus audio versus text—they're all just positions in the sequence to attend over.
 
-**1. Encoder: Frozen vs. Fine-tuned**
-- Frozen: Faster training, leverages pretrained features
-- Fine-tuned: Better alignment but risk of catastrophic forgetting
+The design decisions are:
 
-**2. Projection: Linear vs. Complex**
-- Linear: Simple, fast, often works well
-- MLP: More expressive
-- Q-Former (BLIP-2): Learnable queries compress information
-- Cross-attention: Most flexible but expensive
-
-**3. Training: Joint vs. Staged**
-- Joint: Train everything together (expensive, potentially better)
-- Staged: First align, then instruction-tune (practical, works well)
+1. **Encoder choice:** Pretrained (CLIP, Whisper) vs trained from scratch
+2. **Projection complexity:** Linear vs MLP vs cross-attention (Q-Former)
+3. **Frozen vs fine-tuned:** Freeze encoders for speed, fine-tune for alignment
+4. **Training strategy:** Two-stage (align then instruct-tune) vs joint
 
 ---
 
-## Part 6: Open Source Landscape
+## Part 6: CLIP — The Foundation
 
-### Vision-Language Models
+Most vision-language models use CLIP's vision encoder. Understanding CLIP helps explain why.
 
-| Model | Architecture | Training | Notes |
-|-------|-------------|----------|-------|
-| LLaVA | CLIP ViT + Linear + Vicuna | 2-stage | Clean, simple, effective |
-| InternVL | InternViT + MLP + InternLM | Joint | Strong performance |
-| Qwen-VL | ViT + Cross-attn + Qwen | Joint | Good multilingual |
-| CogVLM | EVA-CLIP + MLP + Vicuna | 2-stage | Visual expert approach |
+CLIP (Contrastive Language-Image Pre-training) learns to align images and text in a shared embedding space. Given a batch of (image, caption) pairs, it learns to:
 
-### Audio-Language Models
+1. Pull matching pairs together
+2. Push non-matching pairs apart
 
-| Model | Architecture | Notes |
-|-------|-------------|-------|
-| Qwen-Audio | Whisper + Qwen | Multiple audio tasks |
-| SALMONN | Whisper + BEATs + Vicuna | Dual audio encoders |
-| LLaMA-Omni | Whisper + LLaMA | Direct speech input/output |
+```
+Batch of images:              Batch of captions:
+[img_1] → embed → v_1         [cap_1] → embed → t_1    "a photo of a cat"
+[img_2] → embed → v_2         [cap_2] → embed → t_2    "sunset over ocean"
+[img_3] → embed → v_3         [cap_3] → embed → t_3    "person riding bike"
+...                           ...
 
-### The Compute Problem
+Similarity matrix (dot products):
+                 cap_1   cap_2   cap_3   cap_4
+         img_1  [ 0.9    0.1     0.05    0.02 ]  ← want diagonal high
+         img_2  [ 0.1    0.85    0.1     0.05 ]
+         img_3  [ 0.05   0.1     0.88    0.03 ]
+         img_4  [ 0.02   0.05    0.03    0.92 ]
 
-Why open-source is slower on audio/video:
-
-```python
-# Compute comparison (rough estimates)
-
-# Text pretraining
-text_tokens_per_example = 2048
-examples_per_batch = 4
-
-# Vision pretraining
-vision_tokens_per_example = 2048 + 197  # text + image
-# ~10% more tokens, but images need encoding (extra forward pass)
-
-# Audio pretraining
-audio_tokens_per_example = 2048 + 1500  # text + 30s audio
-# ~73% more tokens, longer sequences = quadratic attention cost
-
-# Video pretraining
-video_tokens_per_example = 2048 + (8 * 196)  # text + 8 frames
-# ~76% more tokens, plus video loading/decoding is slow
+Loss: cross-entropy pushing diagonal toward 1, off-diagonal toward 0
 ```
 
-The bottleneck isn't just compute—it's also data. High-quality audio/video + text pairs are much harder to curate than image-text pairs.
+After training on 400 million image-text pairs, CLIP learns rich visual representations. The image embedding for a cat photo is close to the text embedding for "a photo of a cat", but far from "a photo of a dog." This works for arbitrary concepts, not just predefined categories.
+
+Why this matters for multimodal LLMs: CLIP's vision encoder already "speaks language" to some extent. Its representations are organized by semantic meaning (cat photos cluster together, not just visually similar images). This gives multimodal LLMs a head start—the projection layer doesn't have to learn visual semantics from scratch, just translate CLIP's already-semantic representations into the LLM's space.
 
 ---
 
-## Part 7: CLIP — The Foundation of Modern Vision-Language
+## Part 7: Why Open Source Lags on Audio and Video
 
-Before we had multimodal LLMs, there was CLIP (Contrastive Language-Image Pre-training). Understanding CLIP is essential because most vision-language models use CLIP's vision encoder.
+You mentioned that open-source models are slower on audio and video. There are two main reasons.
 
-### The CLIP Insight
+**Compute cost.** Text pretraining processes sequences of ~2048 tokens. Adding vision adds ~200 tokens per image (10% overhead). Adding audio adds ~1500 tokens per 30-second clip (75% overhead). Video is worse. And attention is quadratic in sequence length, so longer sequences are disproportionately expensive.
 
-**Goal**: Learn a shared embedding space where images and their descriptions are close together.
+**Data availability.** ImageNet has 14 million labeled images. LAION has 5 billion image-text pairs. These datasets enabled CLIP, which enabled all downstream vision-language models.
 
-```python
-# CLIP training: match images with their captions
-# Given a batch of (image, text) pairs, learn to:
-# 1. Pull matching pairs together
-# 2. Push non-matching pairs apart
-```
+High-quality audio and video datasets are much scarcer. YouTube has lots of video, but getting accurate transcripts or descriptions is hard. Most subtitles have errors. Descriptions are often missing or low-quality. Whisper overcame this with brute scale (680K hours), but training Whisper required OpenAI-scale resources.
 
-### Contrastive Learning
-
-```python
-import torch
-import torch.nn.functional as F
-
-class CLIP(nn.Module):
-    def __init__(self, vision_encoder, text_encoder, embed_dim=512):
-        super().__init__()
-        self.vision_encoder = vision_encoder  # ViT
-        self.text_encoder = text_encoder      # Transformer
-
-        # Project both to shared dimension
-        self.vision_proj = nn.Linear(vision_encoder.embed_dim, embed_dim)
-        self.text_proj = nn.Linear(text_encoder.embed_dim, embed_dim)
-
-        # Learnable temperature
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-    def forward(self, images, texts):
-        # Encode both modalities
-        image_features = self.vision_encoder(images)[:, 0]  # CLS token
-        text_features = self.text_encoder(texts)[:, 0]
-
-        # Project to shared space
-        image_embeds = self.vision_proj(image_features)
-        text_embeds = self.text_proj(text_features)
-
-        # Normalize (crucial for contrastive learning)
-        image_embeds = F.normalize(image_embeds, dim=-1)
-        text_embeds = F.normalize(text_embeds, dim=-1)
-
-        return image_embeds, text_embeds
-
-    def compute_loss(self, image_embeds, text_embeds):
-        # Similarity matrix: (batch, batch)
-        # Entry [i,j] = similarity between image i and text j
-        logit_scale = self.logit_scale.exp()
-        logits = logit_scale * image_embeds @ text_embeds.T
-
-        # Labels: diagonal should be highest (matching pairs)
-        batch_size = logits.shape[0]
-        labels = torch.arange(batch_size, device=logits.device)
-
-        # Symmetric loss: image→text and text→image
-        loss_i2t = F.cross_entropy(logits, labels)
-        loss_t2i = F.cross_entropy(logits.T, labels)
-
-        return (loss_i2t + loss_t2i) / 2
-```
-
-**What CLIP learns**:
-- `image_embed · text_embed` = semantic similarity
-- "A photo of a cat" will be close to cat images
-- "A photo of a dog" will be close to dog images
-- This works for arbitrary concepts, not just predefined classes
-
-### Why CLIP Matters for Multimodal LLMs
-
-1. **Zero-shot classification**: No fine-tuning needed for new tasks
-2. **Strong visual features**: CLIP's ViT learns rich representations
-3. **Aligned spaces**: Vision and language already somewhat aligned
-
-Most multimodal LLMs start with CLIP's vision encoder because it already "speaks language" to some extent.
-
----
-
-## Part 8: Beyond Perception — Generation
-
-So far we've focused on understanding modalities. But what about generating them?
-
-### Image Generation from LLMs
-
-Two approaches:
-
-**1. Discrete tokens (like DALL-E 1, Parti)**
-```python
-# Learn a visual vocabulary (like BPE for images)
-# Image → discrete tokens → LLM generates tokens → tokens → image
-
-class VQ_VAE(nn.Module):
-    """Learn discrete image tokens."""
-    def __init__(self, n_codes=8192, code_dim=256):
-        super().__init__()
-        self.encoder = ...  # Image → continuous latent
-        self.codebook = nn.Embedding(n_codes, code_dim)  # Discrete codes
-        self.decoder = ...  # Discrete codes → image
-
-    def encode(self, image):
-        z = self.encoder(image)  # (batch, h, w, dim)
-        # Find nearest code for each spatial position
-        distances = torch.cdist(z, self.codebook.weight)
-        indices = distances.argmin(dim=-1)  # (batch, h, w) of integers
-        return indices
-
-    def decode(self, indices):
-        z = self.codebook(indices)
-        return self.decoder(z)
-
-# Now LLM can generate images as token sequences!
-# "A cat sitting on a mat" → [img_token_1, img_token_2, ...]
-```
-
-**2. Continuous generation (diffusion-based)**
-```python
-# LLM outputs conditioning embeddings
-# Diffusion model generates image conditioned on those embeddings
-
-class LLMWithDiffusion(nn.Module):
-    def __init__(self, llm, diffusion_model):
-        super().__init__()
-        self.llm = llm
-        self.diffusion = diffusion_model
-
-    def generate_image(self, prompt_tokens):
-        # LLM produces conditioning
-        llm_output = self.llm(prompt_tokens)
-        conditioning = llm_output[:, -1, :]  # Or pooled output
-
-        # Diffusion generates image
-        return self.diffusion.sample(conditioning)
-```
-
-### Audio Generation
-
-Similar pattern—either discrete tokens (like AudioLM) or continuous generation:
-
-```python
-# AudioLM approach: hierarchical tokens
-# Semantic tokens (from w2v-BERT) → Coarse acoustic → Fine acoustic → Audio
-
-# 1. LLM generates semantic tokens (captures "what" is said)
-# 2. Separate model generates acoustic tokens (captures "how" it sounds)
-# 3. Decoder reconstructs waveform
-```
+Until there's a "CLIP for audio" that the community can build on, open-source audio-language models will lag behind. Video is even further back—we don't yet have a dominant pretrained video encoder that everyone can use as a foundation.
 
 ---
 
 ## Summary
 
-1. **Core principle**: Convert all modalities to sequences of vectors that live in the LLM's embedding space
+The core idea of multimodality is simple: convert every modality into sequences of vectors that live in the LLM's embedding space. The transformer doesn't care where vectors come from—it just attends over positions.
 
-2. **Vision**: Patch an image into tokens with ViT, project to LLM dimension
+For vision, ViT converts images to patch sequences. For audio, we first transform to mel spectrograms, then encode with transformers (Whisper). For video, we sample frames and add temporal modeling.
 
-3. **Audio**: Convert to mel spectrogram, encode with transformer, project to LLM dimension. Whisper showed massive scale overcomes weak supervision.
+The practical recipe is: take a good pretrained encoder (CLIP for vision, Whisper for audio), add a projection layer, freeze the encoder initially, and train the projection to align with the LLM. Then optionally fine-tune everything together for better integration.
 
-4. **Video**: Sample frames, encode each, handle temporal relationships, project to LLM dimension
+Native multimodality (GPT-4o style) trains all modalities jointly from scratch—more elegant, but requires immense compute. The encoder-projection approach lets you bootstrap from existing specialists.
 
-5. **The pattern is universal**: `Raw → Encoder → Projection → LLM`
-
-6. **CLIP**: Foundation for vision-language, learns aligned embedding spaces via contrastive learning
-
-7. **Native multimodality** (GPT-4o style) trains all modalities jointly from scratch—more elegant but requires immense compute
-
-8. **Open-source gap**: Not just compute, but also data availability for audio/video
-
-9. **Generation**: Either discretize modalities into tokens or use continuous generation (diffusion)
+The open-source gap exists because audio and video are more expensive (longer sequences) and lack the large-scale pretrained encoders that vision has (CLIP). This will likely close as more compute becomes available and better datasets emerge.
