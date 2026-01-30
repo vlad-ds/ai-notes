@@ -280,6 +280,27 @@ def prepare_targets(tokens, mask):
     return targets
 ```
 
+**What counts as "valid" vs "invalid" tokens:**
+
+- **Invalid (masked, targets = -1):** Tokens the model didn't generate
+  - Prompt tokens (the question was given)
+  - Tool output tokens (calculator results injected by the environment)
+  - Padding tokens (used to make batched sequences the same length)
+
+- **Valid (not masked):** Tokens the model actually chose
+  - The model's reasoning/chain-of-thought
+  - The final answer
+
+We only compute loss on valid tokens. It wouldn't make sense to credit or blame the model for tokens it didn't generate. If the calculator outputs "42", that's not the model's decision.
+
+**A note on thinking tokens:**
+
+NanoChat doesn't have a separate "thinking" window vs "response" window like some reasoning models do. But if it did, thinking tokens would still be **valid** (not masked). The model generated them, so we want gradient signal flowing through them.
+
+This is the whole point of RL on reasoning: the model learns which thinking patterns lead to correct answers. If you masked out thinking tokens, you'd be saying "only the final answer matters, not how you got there." But the chain-of-thought IS what makes the answer correct. The +0.75 advantage for a correct answer flows back through both the reasoning AND the final answer tokens, teaching the model which reasoning patterns work.
+
+The thinking vs response distinction is about what's shown to the **user**, not about what's trained on.
+
 This is conceptually similar to the prompt masking we discussed in Part 2, where SFT only backprops through the response, not the prompt. Here it's extended to also mask out tool execution results within the response.
 
 ## Putting It All Together
