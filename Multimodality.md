@@ -246,6 +246,67 @@ Let's trace through concretely:
 - CLS token has attended to all patches, directly and indirectly, many times
 - Its representation now encodes global image features: "this image contains a cat, facing left, on a couch"
 
+**What makes the CLS token special? Why does IT become the aggregator?**
+
+Here's the key insight: the CLS token isn't inherently special. It becomes the aggregator because **we only use it for the final prediction, and we throw away all other tokens.**
+
+Look at how classification works:
+
+```python
+# After transformer processing, we have 257 output vectors
+output = transformer(sequence)  # shape: (257, 1024)
+
+# We ONLY take the CLS token (position 0) and ignore the other 256
+cls_output = output[0]  # shape: (1024,)
+
+# Only CLS goes to the classifier
+logits = classifier(cls_output)  # shape: (1000,) for 1000 classes
+
+# Loss is computed only from this prediction
+loss = cross_entropy(logits, true_label)
+```
+
+The 256 patch token outputs? **We throw them away.** They don't contribute to the loss. They don't affect the prediction.
+
+This is why CLS becomes the aggregator: it's the only token whose output matters. During backpropagation:
+
+1. Loss depends on classifier output
+2. Classifier output depends on CLS token output
+3. CLS token output depends on what CLS attended to
+4. So gradients push CLS to attend to whatever helps classification
+
+The patch tokens don't have this pressure. Their outputs aren't used, so there's no gradient signal saying "patch 47, you need to aggregate global information." They just need to be useful things for CLS to attend *to*.
+
+**Could we use a different token?**
+
+Yes! We could use patch token 128 (the center) instead:
+
+```python
+center_output = output[128]  # Use center patch instead of CLS
+logits = classifier(center_output)
+```
+
+If we trained with this setup, patch 128 would learn to aggregate information, because now IT'S the one whose output matters. The CLS token would become useless (no gradient signal to shape it).
+
+We could even use the average of all tokens:
+
+```python
+avg_output = output.mean(dim=0)  # Average all 257 tokens
+logits = classifier(avg_output)
+```
+
+This would spread the "aggregation pressure" across all tokens.
+
+**So why use a dedicated CLS token?**
+
+The advantage of a dedicated CLS token is separation of concerns:
+- Patch tokens can focus on representing their local image regions
+- CLS token can focus purely on aggregation
+
+If we used patch 128 for classification, that patch would have two jobs: represent its local region AND aggregate global info. These might conflict.
+
+The CLS token has no local region—it's not tied to any patch. Its only job is aggregation, so it can specialize fully for that purpose.
+
 **How does the CLS token learn what to aggregate?**
 
 Through training. The loss signal flows backward from the classification task:
