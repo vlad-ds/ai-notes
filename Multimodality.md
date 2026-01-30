@@ -496,7 +496,14 @@ Here's where multimodality actually happens. We have:
 - Vision encoder output: 257 vectors of dimension 1024
 - LLM embedding space: vectors of dimension 4096 (for a typical 7B model)
 
-These don't match. We need a projection layer that maps vision space into language space. The simplest version is just a linear layer:
+What do those 257 vectors represent?
+
+- **Vector 0 (CLS)**: The whole image, aggregated. After 12 layers of attending to all patches, this vector encodes global information like "a cat sitting on a blue couch."
+- **Vectors 1-256 (patches)**: Each represents a specific spatial region of the image, enriched by context from other patches. Vector 47 might encode "cat's ear, top-left area, with fur texture continuing into neighboring regions." These vectors know about their local content AND have context from what's nearby (through attention in earlier layers).
+
+For classification, we only used the CLS vector. But for multimodal LLMs, we often pass **all 257 vectors** to the language model. This gives the LLM access to spatially-localized information—it can "look at" specific regions when answering questions like "what color is the object in the top-right corner?"
+
+These don't match the LLM's embedding dimension. We need a projection layer that maps vision space into language space. The simplest version is just a linear layer:
 
 ```python
 vision_proj = nn.Linear(1024, 4096)
