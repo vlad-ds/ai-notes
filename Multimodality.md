@@ -98,7 +98,44 @@ embedded_patches = patch_embed(patches)  # shape: (256, 1024)
 
 This is **learned compression**. The weight matrix starts random, but during training it learns which combinations of pixels matter. Maybe it learns that certain edge patterns are important, or that color gradients in particular directions indicate texture. The 1024 output dimensions encode these learned features.
 
-(Technical note: In practice, this is often implemented as a 2D convolution with kernel_size=32 and stride=32, which does the same thing more efficiently. But conceptually, it's just "flatten each patch, then multiply by a weight matrix.")
+**Why you'll see this written as a "convolution"**
+
+In actual ViT code, you'll often see patch embedding implemented like this:
+
+```python
+self.proj = nn.Conv2d(in_channels=3, out_channels=1024, kernel_size=32, stride=32)
+```
+
+This looks different from the `nn.Linear` approach above, but it does exactly the same thing. Here's why.
+
+A 2D convolution is an operation that slides a small window (the "kernel") across an image. At each position, it:
+1. Extracts the pixels under the window
+2. Multiplies them by learned weights
+3. Sums to produce one output number
+
+Normally, convolutions slide the window one pixel at a time, producing many overlapping outputs. But we can control how far the window moves between positions with the "stride" parameter.
+
+When kernel_size=32 and stride=32, the window is 32×32 pixels and moves 32 pixels between positions—meaning it doesn't overlap at all. It lands exactly on each patch once:
+
+```
+stride=32 means: move 32 pixels between window positions
+
+┌────┬────┬────┬────┐
+│ ■  │    │    │    │  Window at position (0,0)
+├────┼────┼────┼────┤
+│    │    │    │    │
+└────┴────┴────┴────┘
+       ↓ move right by 32 pixels
+┌────┬────┬────┬────┐
+│    │ ■  │    │    │  Window at position (0,1)
+├────┼────┼────┼────┤
+│    │    │    │    │
+└────┴────┴────┴────┘
+```
+
+With `out_channels=1024`, the convolution produces 1024 output values at each window position—exactly like multiplying the flattened patch (3072 values) by a weight matrix (3072 × 1024) to get 1024 outputs.
+
+So `nn.Conv2d(3, 1024, kernel_size=32, stride=32)` is mathematically equivalent to "extract each 32×32 patch, flatten it, multiply by a learned matrix." The convolution version is just more efficient because it's implemented as a single optimized operation instead of explicit loops.
 
 Now we have 256 vectors instead of 786K values (512×512×3)—a 3000× reduction. And each vector represents a semantic chunk of the image rather than meaningless individual pixels.
 
