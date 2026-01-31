@@ -83,8 +83,12 @@ ASCII box-drawing tables (with `┌`, `│`, `└` characters) often render poor
 - "Let's break this down:"
 - "It's worth noting that..."
 - "Interestingly enough..."
+- "The formulas above look like they dropped from the sky. They didn't."
+- "You might be wondering..."
+- "The bottom line:"
+- "Here's the actual methodology."
 
-These are filler. If something is a key insight, just state it. The insight itself should make its importance obvious. Delete the throat-clearing and get to the point.
+These are filler. If something is a key insight, just state it. The insight itself should make its importance obvious. Delete the throat-clearing and get to the point. Just start explaining.
 
 **No dialogue artifacts.** Notes are standalone documents, not transcripts. Don't include phrases that reference a conversation:
 - "So you're exactly right:"
@@ -103,23 +107,64 @@ The reader has no context for who "you" is or what was said earlier. Write as if
 I'm not fluent in mathematical notation. When formulas are necessary:
 
 1. **Always include them** - They're part of the complete picture
-2. **Break them down** - Explain each symbol and what it represents
-3. **Translate to Python** - Show the formula as actual code. This is how I truly understand it.
+2. **Use LaTeX** - Render formulas properly with `$$` for block equations and `$` for inline math
+3. **Break down EVERY term** - Explain each symbol, subscript, and constant. Don't assume anything is obvious.
+4. **Translate to Python** - Show the formula as actual code. This is how I truly understand it.
+
+**Use LaTeX, not plain code blocks for math.** Write `$$L(N) = \frac{A}{N^\alpha}$$` not `` `L(N) = A/N^α` ``. Obsidian renders LaTeX beautifully.
 
 Example of what I need:
 
-```
-Formula: L = -E[log P(y|x)]
+$$L = -\mathbb{E}[\log P(y|x)]$$
 
-Breakdown:
-- L is the loss we want to minimize
-- E[...] means "expected value" or "average over all examples"
-- log P(y|x) is the log probability the model assigns to the correct answer y given input x
+Breaking down each term:
+- $L$ = the loss we want to minimize
+- $\mathbb{E}[...]$ = "expected value" or "average over all examples"
+- $\log P(y|x)$ = the log probability the model assigns to the correct answer $y$ given input $x$
 - The negative sign flips it so minimizing loss = maximizing probability
 
 In Python:
+```python
 log_probs = model.log_prob(y, given=x)  # shape: (batch_size,)
 loss = -log_probs.mean()  # average over batch, negate
 ```
 
-This combination of notation + explanation + code is how formulas should always be presented.
+This combination of LaTeX notation + term-by-term explanation + code is how formulas should always be presented.
+
+## Obsidian Plugins
+
+The vault has several community plugins installed:
+
+**For interactive charts: Use Plotly HTML files.** Generate with the script in `scripts/generate_interactive_charts.py`. These open in a browser with working sliders. Link from notes like: `**[→ Interactive version](assets/chart_name.html)**`
+
+**For static charts: Use matplotlib.** Generate PNGs and save to `assets/`. Embed with `![[assets/filename.png]]`.
+
+**Desmos (`obsidian-desmos`)** - Avoid. Sliders don't work, limited interactivity.
+
+**Charts (`obsidian-charts`)** - Avoid. Limited compared to matplotlib/Plotly.
+
+## Papers and References
+
+When researching topics that involve academic papers:
+
+1. **Save PDFs to `papers/`**: Instead of stuffing paper contents into context, download PDFs to the `papers/` subfolder for future reference
+2. **Link in notes**: Reference papers with markdown links in the notes themselves
+3. **Keep a lightweight context**: Summarize key findings rather than pasting entire papers
+
+## Lessons Learned
+
+Hard-won lessons from writing these notes:
+
+**Define terms before using them.** If you introduce "resolution" in an argument, first explain what resolution *is* and how to calculate it. A term that seems obvious often isn't. When in doubt, add a sentence or a table clarifying the definition.
+
+**Keep examples consistent.** If you're showing how the same N tiles a 1D, 2D, and 3D space differently, use the *same* N throughout (like N=64 = 64¹ = 8² = 4³). Don't switch to N=27 for 3D just because it makes a nicer cube. Inconsistency obscures the point.
+
+**Show derivations, don't just state results.** "Both N and D scale as C^0.5" is a claim. The derivation—substituting the constraint, taking the derivative, solving for N—is understanding. If a result seems to come from nowhere, derive it step by step.
+
+**When the reader is confused, expand rather than tweak.** If a section isn't landing, the fix is usually *more* explanation, not wordsmithing. Add an earlier example, break it into smaller steps, or introduce an analogy. The manifold theory section needed a full rewrite with gradual buildup, not a few clarifying phrases.
+
+**Be honest about what we don't know.** Some things are empirical observations without theoretical grounding. Say so. "We don't have a first-principles explanation for why α ≈ β" is more useful than hand-waving about symmetry.
+
+**Trace where numbers come from.** "20 tokens per parameter" sounds like a law of nature. It's actually what falls out when you plug Chinchilla's fitted constants into an optimization. That context matters—it explains why Karpathy found 8:1 instead.
+
+**Tables clarify scaling relationships.** When showing how something varies across cases (dimensions, model sizes, etc.), a table often communicates faster than prose or repeated examples.
